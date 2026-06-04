@@ -1,0 +1,77 @@
+version: "3.9"
+
+services:
+
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: airtel
+      POSTGRES_PASSWORD: airtelpass
+      POSTGRES_DB: alarmdb
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U airtel -d alarmdb"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  event-processor:
+    build: ../event-processor
+    restart: unless-stopped
+    ports:
+      - "8001:8001"
+    environment:
+      ALARM_MANAGER_URL: http://alarm-manager:8002/alarm
+      MIN_CONFIDENCE: "0.80"
+      CONSECUTIVE_FRAMES: "3"
+      RESTRICTED_SITES: "BTS_SITE_001,BTS_SITE_002,BTS_SITE_003"
+      WINDOW_SECONDS: "30"
+    depends_on:
+      - alarm-manager
+
+  alarm-manager:
+    build: ../alarm-manager
+    restart: unless-stopped
+    ports:
+      - "8002:8002"
+    environment:
+      DATABASE_URL: postgresql://airtel:airtelpass@postgres:5432/alarmdb
+      ENODE_URL: ${ENODE_URL:-}
+      ENODE_API_KEY: ${ENODE_API_KEY:-}
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  detection-service:
+    build: ../detection-service
+    restart: unless-stopped
+    environment:
+      RTSP_URL: ${RTSP_URL:-rtsp://admin:admin@192.168.1.100:554/stream1}
+      CAMERA_ID: ${CAMERA_ID:-CAM01}
+      SITE_ID: ${SITE_ID:-BTS_SITE_001}
+      ZONE_ID: ${ZONE_ID:-RESTRICTED_ZONE_A}
+      YOLO_MODEL: yolov8n.pt
+      CONFIDENCE_THRESHOLD: "0.50"
+      EVENT_PROCESSOR_URL: http://event-processor:8001/detection
+      THROTTLE_SECONDS: "5"
+    depends_on:
+      - event-processor
+    # Uncomment if camera is on host network:
+    # network_mode: host
+
+  dashboard:
+    build: ../dashboard
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      NEXT_PUBLIC_ALARM_MANAGER_URL: http://localhost:8002
+    depends_on:
+      - alarm-manager
+
+volumes:
+  pgdata:
