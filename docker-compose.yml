@@ -1,0 +1,82 @@
+version: "3.9"
+
+services:
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: airtel-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: airtel
+      POSTGRES_PASSWORD: airtel
+      POSTGRES_DB: airtel_monitor
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U airtel"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  detection-service:
+    build: ./detection-service
+    container_name: airtel-detector
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      EVENT_PROCESSOR_URL: http://event-processor:8001
+    devices:
+      - /dev/video0:/dev/video0    # webcam passthrough (remove for RTSP-only)
+    depends_on:
+      - event-processor
+    volumes:
+      - ./detection-service:/app
+
+  event-processor:
+    build: ./event-processor
+    container_name: airtel-event-proc
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      ALARM_MANAGER_URL: http://alarm-manager:8002
+    ports:
+      - "8001:8001"
+    depends_on:
+      - alarm-manager
+    volumes:
+      - ./event-processor:/app
+      - ./shared:/shared
+
+  alarm-manager:
+    build: ./alarm-manager
+    container_name: airtel-alarm-mgr
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://airtel:airtel@postgres:5432/airtel_monitor
+    ports:
+      - "8002:8002"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - ./alarm-manager:/app
+      - ./shared:/shared
+
+  dashboard:
+    build: ./dashboard
+    container_name: airtel-dashboard
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      NEXT_PUBLIC_ALARM_MANAGER_WS: ws://localhost:8002/ws
+      NEXT_PUBLIC_ALARM_MANAGER_URL: http://alarm-manager:8002
+    ports:
+      - "3000:3000"
+    depends_on:
+      - alarm-manager
+
+volumes:
+  postgres_data:
