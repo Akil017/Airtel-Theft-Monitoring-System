@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 # Airtel Theft Monitoring System
 
 AI-powered telecom site intrusion detection using YOLOv8, FastAPI, PostgreSQL, and Next.js.
@@ -86,3 +87,7 @@ airtel-theft-monitor/
 
 Built as part of Airtel Networks internship (Assam circle).  
 Addresses real BTS site security issues: battery theft, diesel theft, cable theft, vandalism.
+=======
+# Airtel-Theft-Monitoring-System
+Airtel theft monitoring system using cctv human movement + hooters to generate alarm 
+>>>>>>> 61bfcd0006f57f72ac342547cd3591e7f8e48b00
