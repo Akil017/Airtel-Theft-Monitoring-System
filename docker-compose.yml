@@ -28,7 +28,7 @@ services:
     environment:
       EVENT_PROCESSOR_URL: http://event-processor:8001
     devices:
-      - /dev/video0:/dev/video0    # webcam passthrough (remove for RTSP-only)
+      - /dev/video0:/dev/video0    # webcam passthrough — remove for RTSP-only
     depends_on:
       - event-processor
     volumes:
@@ -72,7 +72,7 @@ services:
     env_file: .env
     environment:
       NEXT_PUBLIC_ALARM_MANAGER_WS: ws://localhost:8002/ws
-      NEXT_PUBLIC_ALARM_MANAGER_URL: http://alarm-manager:8002
+      NEXT_PUBLIC_ALARM_MANAGER_URL: http://localhost:8002
     ports:
       - "3000:3000"
     depends_on:

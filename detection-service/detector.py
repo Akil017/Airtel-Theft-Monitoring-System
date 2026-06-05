@@ -1,117 +1,100 @@
 """
-Detection Service
------------------
-Reads camera RTSP stream, runs YOLOv8 inference,
-filters for person class, and POSTs detection events
-to the Event Processor.
+YOLO Detection Service
+Reads RTSP / webcam stream, runs YOLOv8 inference, emits detection events.
 """
-
 import cv2
 import time
-import httpx
+import json
 import logging
-import os
-from datetime import datetime, timezone
+import httpx
+import asyncio
 from ultralytics import YOLO
+from datetime import datetime, timezone
+from config import settings
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [detection-service] %(levelname)s: %(message)s"
-)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [DETECTOR] %(message)s")
 log = logging.getLogger(__name__)
 
-# ── Configuration (override via environment variables) ──────────────────────
-RTSP_URL = os.getenv("RTSP_URL", "rtsp://admin:admin@192.168.1.100:554/stream1")
-CAMERA_ID = os.getenv("CAMERA_ID", "CAM01")
-SITE_ID = os.getenv("SITE_ID", "BTS_SITE_001")
-ZONE_ID = os.getenv("ZONE_ID", "RESTRICTED_ZONE_A")
-MODEL_PATH = os.getenv("YOLO_MODEL", "yolov8n.pt")
-CONFIDENCE_THRESHOLD = float(os.getenv("CONFIDENCE_THRESHOLD", "0.5"))
-EVENT_PROCESSOR_URL = os.getenv("EVENT_PROCESSOR_URL", "http://event-processor:8001/detection")
-THROTTLE_SECONDS = int(os.getenv("THROTTLE_SECONDS", "5"))   # min gap between events per camera
-PERSON_CLASS_ID = 0  # COCO class 0 = person
 
+class DetectionService:
+    def __init__(self):
+        log.info(f"Loading model: {settings.MODEL_PATH}")
+        self.model = YOLO(settings.MODEL_PATH)
+        self.camera_id = settings.CAMERA_ID
+        self.confidence_threshold = settings.CONFIDENCE_THRESHOLD
+        self.frame_count = 0
+        self.last_event_time = 0
 
-def load_model() -> YOLO:
-    log.info(f"Loading YOLO model from '{MODEL_PATH}'")
-    model = YOLO(MODEL_PATH)
-    log.info("Model loaded successfully")
-    return model
+    def open_stream(self) -> cv2.VideoCapture:
+        source = settings.RTSP_URL if settings.RTSP_URL else 0
+        cap = cv2.VideoCapture(source)
+        if not cap.isOpened():
+            raise RuntimeError(f"Cannot open stream: {source}")
+        log.info(f"Stream opened: {source}")
+        return cap
 
+    def build_event(self, confidence: float, bbox: list) -> dict:
+        return {
+            "camera_id": self.camera_id,
+            "site_id": settings.SITE_ID,
+            "event_type": "HUMAN_DETECTED",
+            "confidence": round(confidence, 4),
+            "bbox": bbox,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "frame": self.frame_count,
+        }
 
-def open_stream(rtsp_url: str) -> cv2.VideoCapture:
-    log.info(f"Connecting to stream: {rtsp_url}")
-    cap = cv2.VideoCapture(rtsp_url)
-    if not cap.isOpened():
-        raise RuntimeError(f"Cannot open stream: {rtsp_url}")
-    log.info("Stream opened successfully")
-    return cap
-
-
-def post_event(payload: dict) -> None:
-    try:
-        resp = httpx.post(EVENT_PROCESSOR_URL, json=payload, timeout=5)
-        resp.raise_for_status()
-        log.info(f"Event sent → {resp.status_code}")
-    except Exception as exc:
-        log.warning(f"Failed to post event: {exc}")
-
-
-def run() -> None:
-    model = load_model()
-    last_sent: float = 0.0
-
-    while True:
-        cap = None
+    async def post_event(self, event: dict):
         try:
-            cap = open_stream(RTSP_URL)
-        except RuntimeError as err:
-            log.error(f"{err} — retrying in 10s")
-            time.sleep(10)
-            continue
+            async with httpx.AsyncClient(timeout=3.0) as client:
+                r = await client.post(
+                    f"{settings.EVENT_PROCESSOR_URL}/events/detection",
+                    json=event,
+                )
+                log.info(f"Event sent → {r.status_code} | conf={event['confidence']}")
+        except Exception as e:
+            log.warning(f"Event POST failed: {e}")
 
-        log.info("Starting inference loop")
+    def run(self):
+        cap = self.open_stream()
+        log.info("Detection loop started")
+
+        loop = asyncio.new_event_loop()
+
         while True:
             ret, frame = cap.read()
             if not ret:
-                log.warning("Frame read failed — reconnecting")
-                break
+                log.warning("Frame read failed — retrying in 2s")
+                time.sleep(2)
+                cap = self.open_stream()
+                continue
 
-            results = model(frame, verbose=False)[0]
+            self.frame_count += 1
 
-            person_detected = False
-            best_conf = 0.0
-            best_bbox = None
+            # Run inference every N frames to save CPU
+            if self.frame_count % settings.INFERENCE_EVERY_N_FRAMES != 0:
+                continue
+
+            results = self.model(frame, verbose=False)[0]
 
             for box in results.boxes:
-                cls_id = int(box.cls[0])
+                cls = int(box.cls[0])
                 conf = float(box.conf[0])
-                if cls_id == PERSON_CLASS_ID and conf >= CONFIDENCE_THRESHOLD:
-                    person_detected = True
-                    if conf > best_conf:
-                        best_conf = conf
-                        x1, y1, x2, y2 = box.xyxy[0].tolist()
-                        best_bbox = {"x1": x1, "y1": y1, "x2": x2, "y2": y2}
+                label = self.model.names[cls]
 
-            now = time.time()
-            if person_detected and (now - last_sent) >= THROTTLE_SECONDS:
-                payload = {
-                    "camera_id": CAMERA_ID,
-                    "event_type": "HUMAN_DETECTED",
-                    "confidence": round(best_conf, 4),
-                    "timestamp": datetime.now(timezone.utc).isoformat(),
-                    "site_id": SITE_ID,
-                    "zone_id": ZONE_ID,
-                    "bbox": best_bbox,
-                }
-                log.info(f"Person detected (conf={best_conf:.2f}) — posting event")
-                post_event(payload)
-                last_sent = now
+                if label == "person" and conf >= self.confidence_threshold:
+                    # Throttle: don't spam events
+                    now = time.time()
+                    if now - self.last_event_time < settings.EVENT_THROTTLE_SECONDS:
+                        continue
+                    self.last_event_time = now
 
-        if cap:
-            cap.release()
-        time.sleep(3)
+                    x1, y1, x2, y2 = [int(v) for v in box.xyxy[0]]
+                    event = self.build_event(conf, [x1, y1, x2, y2])
+                    loop.run_until_complete(self.post_event(event))
+
+        cap.release()
 
 
 if __name__ == "__main__":
-    run()
+    DetectionService().run()

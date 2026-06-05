@@ -1,14 +1,22 @@
+"""
+Shared data models — imported by event-processor and alarm-manager.
+"""
 from pydantic import BaseModel, Field
 from datetime import datetime
-from typing import Optional
+from typing import Optional, List
 from enum import Enum
 
 
-class SeverityLevel(str, Enum):
-    LOW = "LOW"
-    MEDIUM = "MEDIUM"
-    HIGH = "HIGH"
+class EventType(str, Enum):
+    HUMAN_DETECTED = "HUMAN_DETECTED"
+
+
+class AlarmSeverity(str, Enum):
     CRITICAL = "CRITICAL"
+    MAJOR = "MAJOR"
+    MINOR = "MINOR"
+    WARNING = "WARNING"
+    CLEARED = "CLEARED"
 
 
 class AlarmStatus(str, Enum):
@@ -19,30 +27,38 @@ class AlarmStatus(str, Enum):
 
 class DetectionEvent(BaseModel):
     camera_id: str
-    event_type: str = "HUMAN_DETECTED"
-    confidence: float = Field(..., ge=0.0, le=1.0)
-    timestamp: datetime = Field(default_factory=datetime.utcnow)
-    site_id: Optional[str] = None
-    zone_id: Optional[str] = None
-    bbox: Optional[dict] = None
-    snapshot_path: Optional[str] = None
+    site_id: str
+    event_type: EventType
+    confidence: float = Field(ge=0.0, le=1.0)
+    bbox: Optional[List[int]] = None
+    timestamp: datetime
+    frame: Optional[int] = None
 
 
-class AlarmEvent(BaseModel):
-    id: Optional[str] = None
+class SecurityAlarm(BaseModel):
+    alarm_id: str
+    site_id: str
     camera_id: str
-    site_id: Optional[str] = None
-    zone_id: Optional[str] = None
-    severity: SeverityLevel = SeverityLevel.HIGH
-    status: AlarmStatus = AlarmStatus.ACTIVE
-    confidence: float
-    timestamp: datetime = Field(default_factory=datetime.utcnow)
-    acknowledged_at: Optional[datetime] = None
-    cleared_at: Optional[datetime] = None
-    snapshot_path: Optional[str] = None
-    enode_alarm_id: Optional[str] = None
-
-
-class AlarmUpdate(BaseModel):
+    severity: AlarmSeverity
     status: AlarmStatus
-    notes: Optional[str] = None
+    description: str
+    confidence: float
+    detection_count: int
+    first_detected: datetime
+    last_updated: datetime
+    cleared_at: Optional[datetime] = None
+
+    class Config:
+        use_enum_values = True
+
+
+class AlarmAckRequest(BaseModel):
+    alarm_id: str
+    operator_id: str
+    note: Optional[str] = None
+
+
+class AlarmClearRequest(BaseModel):
+    alarm_id: str
+    operator_id: str
+    reason: Optional[str] = None

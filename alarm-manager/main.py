@@ -1,304 +1,231 @@
 """
 Alarm Manager Service  (port 8002)
-------------------------------------
-Responsibilities:
-  1. Persist alarm events to PostgreSQL
-  2. Broadcast new/updated alarms over WebSocket to the dashboard
-  3. POST alarm to eNode REST API (optional — set ENODE_URL env var)
-  4. Expose REST endpoints for dashboard (list, acknowledge, clear)
+Persists alarms to PostgreSQL, broadcasts over WebSocket,
+integrates with eNode REST API.
 """
-
 import asyncio
-import httpx
 import logging
-import os
-import uuid
+import httpx
 from datetime import datetime, timezone
-from typing import Optional, List
+from typing import List, Optional
+from contextlib import asynccontextmanager
 
 import asyncpg
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, Field
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [alarm-manager] %(levelname)s: %(message)s"
-)
+import sys
+sys.path.insert(0, "/shared")
+from models import SecurityAlarm, AlarmAckRequest, AlarmClearRequest, AlarmStatus
+from config import settings
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [ALARM-MGR] %(message)s")
 log = logging.getLogger(__name__)
 
-app = FastAPI(
-    title="Alarm Manager",
-    description="Persists alarms, broadcasts over WebSocket, integrates with eNode.",
-    version="1.0.0"
-)
+# ─── DB Schema ───────────────────────────────────────────────────────────────
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-# ── Configuration ────────────────────────────────────────────────────────────
-DATABASE_URL = os.getenv(
-    "DATABASE_URL",
-    "postgresql://airtel:airtelpass@postgres:5432/alarmdb"
-)
-ENODE_URL = os.getenv("ENODE_URL", "")           # leave blank to skip eNode
-ENODE_API_KEY = os.getenv("ENODE_API_KEY", "")
-
-# ── WebSocket connection manager ──────────────────────────────────────────────
-class ConnectionManager:
-    def __init__(self):
-        self.active: List[WebSocket] = []
-
-    async def connect(self, ws: WebSocket):
-        await ws.accept()
-        self.active.append(ws)
-        log.info(f"WS client connected. Total: {len(self.active)}")
-
-    def disconnect(self, ws: WebSocket):
-        self.active.remove(ws)
-        log.info(f"WS client disconnected. Total: {len(self.active)}")
-
-    async def broadcast(self, message: dict):
-        dead = []
-        for ws in self.active:
-            try:
-                await ws.send_json(message)
-            except Exception:
-                dead.append(ws)
-        for ws in dead:
-            self.active.remove(ws)
-
-
-manager = ConnectionManager()
-db_pool: asyncpg.Pool | None = None
-
-
-# ── DB setup ─────────────────────────────────────────────────────────────────
-CREATE_TABLE_SQL = """
+CREATE_TABLE = """
 CREATE TABLE IF NOT EXISTS alarms (
-    id            TEXT PRIMARY KEY,
-    camera_id     TEXT NOT NULL,
-    site_id       TEXT,
-    zone_id       TEXT,
-    severity      TEXT NOT NULL DEFAULT 'HIGH',
-    status        TEXT NOT NULL DEFAULT 'ACTIVE',
-    confidence    REAL NOT NULL,
-    timestamp     TIMESTAMPTZ NOT NULL,
-    acknowledged_at TIMESTAMPTZ,
-    cleared_at    TIMESTAMPTZ,
-    snapshot_path TEXT,
-    enode_alarm_id TEXT
+    alarm_id        TEXT PRIMARY KEY,
+    site_id         TEXT NOT NULL,
+    camera_id       TEXT NOT NULL,
+    severity        TEXT NOT NULL,
+    status          TEXT NOT NULL DEFAULT 'ACTIVE',
+    description     TEXT,
+    confidence      REAL NOT NULL,
+    detection_count INTEGER NOT NULL DEFAULT 1,
+    first_detected  TIMESTAMPTZ NOT NULL,
+    last_updated    TIMESTAMPTZ NOT NULL,
+    cleared_at      TIMESTAMPTZ,
+    enode_alarm_id  TEXT
 );
 """
 
+# ─── WebSocket manager ────────────────────────────────────────────────────────
 
-@app.on_event("startup")
-async def startup():
+class WSManager:
+    def __init__(self):
+        self._clients: List[WebSocket] = []
+
+    async def connect(self, ws: WebSocket):
+        await ws.accept()
+        self._clients.append(ws)
+        log.info(f"WS connect. Clients: {len(self._clients)}")
+
+    def disconnect(self, ws: WebSocket):
+        self._clients.remove(ws)
+        log.info(f"WS disconnect. Clients: {len(self._clients)}")
+
+    async def broadcast(self, payload: dict):
+        dead = []
+        for ws in self._clients:
+            try:
+                await ws.send_json(payload)
+            except Exception:
+                dead.append(ws)
+        for ws in dead:
+            self._clients.remove(ws)
+
+    @property
+    def count(self):
+        return len(self._clients)
+
+
+ws_manager = WSManager()
+db_pool: asyncpg.Pool = None
+
+
+# ─── App lifespan ─────────────────────────────────────────────────────────────
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
     global db_pool
-    retries = 10
-    for i in range(retries):
+    for attempt in range(15):
         try:
-            db_pool = await asyncpg.create_pool(DATABASE_URL, min_size=2, max_size=10)
+            db_pool = await asyncpg.create_pool(
+                settings.DATABASE_URL.replace("postgresql+asyncpg://", "postgresql://"),
+                min_size=2, max_size=10,
+            )
             async with db_pool.acquire() as conn:
-                await conn.execute(CREATE_TABLE_SQL)
-            log.info("Database connected and schema ready")
-            return
+                await conn.execute(CREATE_TABLE)
+            log.info("Database ready")
+            break
         except Exception as exc:
-            log.warning(f"DB connect attempt {i+1}/{retries} failed: {exc}")
+            log.warning(f"DB attempt {attempt+1}/15: {exc}")
             await asyncio.sleep(3)
-    raise RuntimeError("Could not connect to database after retries")
+    else:
+        raise RuntimeError("Cannot connect to PostgreSQL")
+
+    yield
+
+    await db_pool.close()
 
 
-@app.on_event("shutdown")
-async def shutdown():
-    if db_pool:
-        await db_pool.close()
+app = FastAPI(title="Alarm Manager", version="1.0.0", lifespan=lifespan)
+app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
 
-# ── Models ───────────────────────────────────────────────────────────────────
-class IncomingAlarm(BaseModel):
-    camera_id: str
-    site_id: Optional[str] = None
-    zone_id: Optional[str] = None
-    confidence: float = Field(..., ge=0.0, le=1.0)
-    timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
-    snapshot_path: Optional[str] = None
+# ─── eNode helper ─────────────────────────────────────────────────────────────
 
-
-class AlarmRecord(BaseModel):
-    id: str
-    camera_id: str
-    site_id: Optional[str]
-    zone_id: Optional[str]
-    severity: str
-    status: str
-    confidence: float
-    timestamp: datetime
-    acknowledged_at: Optional[datetime]
-    cleared_at: Optional[datetime]
-    snapshot_path: Optional[str]
-    enode_alarm_id: Optional[str]
-
-
-class AlarmUpdate(BaseModel):
-    status: str       # ACKNOWLEDGED | CLEARED
-    notes: Optional[str] = None
-
-
-# ── eNode integration ─────────────────────────────────────────────────────────
 async def post_to_enode(alarm: dict) -> Optional[str]:
-    if not ENODE_URL:
-        log.info("eNode URL not configured — skipping eNode integration")
+    if not settings.ENODE_API_URL:
         return None
     try:
+        headers = {"X-API-Key": settings.ENODE_API_KEY or "", "Content-Type": "application/json"}
         payload = {
             "alarmType": "SECURITY_INTRUSION",
-            "severity": "MAJOR",
+            "severity": alarm["severity"],
             "source": alarm["camera_id"],
-            "description": (
-                f"Human detected at {alarm.get('site_id','unknown')} "
-                f"zone {alarm.get('zone_id','unknown')} "
-                f"(confidence {alarm['confidence']:.0%})"
-            ),
-            "timestamp": alarm["timestamp"],
+            "description": alarm["description"],
+            "timestamp": alarm["first_detected"],
         }
-        headers = {"X-API-Key": ENODE_API_KEY, "Content-Type": "application/json"}
-        async with httpx.AsyncClient() as client:
-            resp = await client.post(
-                f"{ENODE_URL}/api/alarms", json=payload, headers=headers, timeout=10
-            )
-            resp.raise_for_status()
-            enode_id = resp.json().get("alarmId")
-            log.info(f"eNode alarm created: {enode_id}")
-            return enode_id
+        async with httpx.AsyncClient(timeout=10) as client:
+            r = await client.post(f"{settings.ENODE_API_URL}/api/alarms", json=payload, headers=headers)
+            r.raise_for_status()
+            eid = r.json().get("alarmId")
+            log.info(f"eNode alarm created: {eid}")
+            return eid
     except Exception as exc:
-        log.error(f"eNode integration failed: {exc}")
+        log.error(f"eNode error: {exc}")
         return None
 
 
-# ── Routes ───────────────────────────────────────────────────────────────────
+# ─── Routes ───────────────────────────────────────────────────────────────────
+
 @app.get("/health")
-def health():
-    return {"status": "ok", "service": "alarm-manager", "ws_clients": len(manager.active)}
+async def health():
+    return {"service": "alarm-manager", "status": "ok", "ws_clients": ws_manager.count}
 
 
-@app.post("/alarm", response_model=AlarmRecord)
-async def create_alarm(incoming: IncomingAlarm):
-    alarm_id = str(uuid.uuid4())
-
-    # Determine severity from confidence
-    if incoming.confidence >= 0.95:
-        severity = "CRITICAL"
-    elif incoming.confidence >= 0.85:
-        severity = "HIGH"
-    elif incoming.confidence >= 0.70:
-        severity = "MEDIUM"
-    else:
-        severity = "LOW"
-
-    alarm_dict = {
-        "id": alarm_id,
-        "camera_id": incoming.camera_id,
-        "site_id": incoming.site_id,
-        "zone_id": incoming.zone_id,
-        "severity": severity,
-        "status": "ACTIVE",
-        "confidence": incoming.confidence,
-        "timestamp": incoming.timestamp,
-        "acknowledged_at": None,
-        "cleared_at": None,
-        "snapshot_path": incoming.snapshot_path,
-        "enode_alarm_id": None,
+@app.get("/stats")
+async def get_stats():
+    async with db_pool.acquire() as conn:
+        total = await conn.fetchval("SELECT COUNT(*) FROM alarms")
+        active = await conn.fetchval("SELECT COUNT(*) FROM alarms WHERE status='ACTIVE'")
+    return {
+        "total_alarms": total,
+        "active_alarms": active,
+        "ws_clients": ws_manager.count,
     }
 
-    # 1. Post to eNode (optional, non-blocking)
-    enode_id = await post_to_enode(alarm_dict)
-    alarm_dict["enode_alarm_id"] = enode_id
 
-    # 2. Persist to PostgreSQL
+@app.post("/alarms", status_code=201)
+async def create_alarm(alarm: SecurityAlarm):
+    # Optional eNode integration
+    enode_id = await post_to_enode(alarm.model_dump(mode="json"))
+
     async with db_pool.acquire() as conn:
         await conn.execute(
             """
             INSERT INTO alarms
-              (id, camera_id, site_id, zone_id, severity, status, confidence,
-               timestamp, snapshot_path, enode_alarm_id)
-            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+              (alarm_id, site_id, camera_id, severity, status, description,
+               confidence, detection_count, first_detected, last_updated, enode_alarm_id)
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+            ON CONFLICT (alarm_id) DO NOTHING
             """,
-            alarm_id, incoming.camera_id, incoming.site_id, incoming.zone_id,
-            severity, "ACTIVE", incoming.confidence, incoming.timestamp,
-            incoming.snapshot_path, enode_id,
+            alarm.alarm_id, alarm.site_id, alarm.camera_id,
+            alarm.severity if isinstance(alarm.severity, str) else alarm.severity.value,
+            alarm.status if isinstance(alarm.status, str) else alarm.status.value,
+            alarm.description, alarm.confidence, alarm.detection_count,
+            alarm.first_detected, alarm.last_updated, enode_id,
         )
 
-    # 3. Broadcast via WebSocket
-    await manager.broadcast({"event": "new_alarm", "alarm": {
-        **alarm_dict,
-        "timestamp": alarm_dict["timestamp"].isoformat(),
-    }})
-
-    log.info(f"Alarm created: {alarm_id} | {severity} | {incoming.camera_id}")
-    return AlarmRecord(**alarm_dict)
+    payload = {**alarm.model_dump(mode="json"), "enode_alarm_id": enode_id}
+    await ws_manager.broadcast({"event": "ALARM_CREATED", "alarm": payload})
+    log.info(f"Alarm created: {alarm.alarm_id} | {alarm.severity} | {alarm.site_id}")
+    return payload
 
 
-@app.get("/alarms", response_model=List[AlarmRecord])
+@app.get("/alarms")
 async def list_alarms(status: Optional[str] = None, limit: int = 100):
     async with db_pool.acquire() as conn:
         if status:
             rows = await conn.fetch(
-                "SELECT * FROM alarms WHERE status=$1 ORDER BY timestamp DESC LIMIT $2",
-                status.upper(), limit
+                "SELECT * FROM alarms WHERE status=$1 ORDER BY first_detected DESC LIMIT $2",
+                status.upper(), limit,
             )
         else:
             rows = await conn.fetch(
-                "SELECT * FROM alarms ORDER BY timestamp DESC LIMIT $1", limit
+                "SELECT * FROM alarms ORDER BY first_detected DESC LIMIT $1", limit
             )
-    return [AlarmRecord(**dict(row)) for row in rows]
+    return [dict(r) for r in rows]
 
 
-@app.patch("/alarms/{alarm_id}", response_model=AlarmRecord)
-async def update_alarm(alarm_id: str, update: AlarmUpdate):
-    now = datetime.now(timezone.utc)
-    new_status = update.status.upper()
-
-    if new_status not in ("ACKNOWLEDGED", "CLEARED"):
-        raise HTTPException(400, "status must be ACKNOWLEDGED or CLEARED")
-
+@app.post("/alarms/acknowledge")
+async def acknowledge_alarm(req: AlarmAckRequest):
     async with db_pool.acquire() as conn:
-        if new_status == "ACKNOWLEDGED":
-            row = await conn.fetchrow(
-                "UPDATE alarms SET status=$1, acknowledged_at=$2 WHERE id=$3 RETURNING *",
-                new_status, now, alarm_id
-            )
-        else:
-            row = await conn.fetchrow(
-                "UPDATE alarms SET status=$1, cleared_at=$2 WHERE id=$3 RETURNING *",
-                new_status, now, alarm_id
-            )
-
+        row = await conn.fetchrow(
+            "UPDATE alarms SET status='ACKNOWLEDGED', last_updated=$1 WHERE alarm_id=$2 RETURNING *",
+            datetime.now(timezone.utc), req.alarm_id,
+        )
     if not row:
-        raise HTTPException(404, f"Alarm {alarm_id} not found")
+        raise HTTPException(404, f"Alarm {req.alarm_id} not found")
+    await ws_manager.broadcast({"event": "ALARM_ACKNOWLEDGED", "alarm_id": req.alarm_id})
+    return {"status": "acknowledged", "alarm_id": req.alarm_id}
 
-    alarm = AlarmRecord(**dict(row))
-    await manager.broadcast({"event": "alarm_updated", "alarm": {
-        **dict(row),
-        "timestamp": row["timestamp"].isoformat(),
-        "acknowledged_at": row["acknowledged_at"].isoformat() if row["acknowledged_at"] else None,
-        "cleared_at": row["cleared_at"].isoformat() if row["cleared_at"] else None,
-    }})
-    return alarm
+
+@app.post("/alarms/clear")
+async def clear_alarm(req: AlarmClearRequest):
+    now = datetime.now(timezone.utc)
+    async with db_pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "UPDATE alarms SET status='CLEARED', cleared_at=$1, last_updated=$1 WHERE alarm_id=$2 RETURNING *",
+            now, req.alarm_id,
+        )
+    if not row:
+        raise HTTPException(404, f"Alarm {req.alarm_id} not found")
+    await ws_manager.broadcast({"event": "ALARM_CLEARED", "alarm_id": req.alarm_id})
+    return {"status": "cleared", "alarm_id": req.alarm_id}
 
 
 @app.websocket("/ws")
 async def websocket_endpoint(ws: WebSocket):
-    await manager.connect(ws)
+    await ws_manager.connect(ws)
     try:
         while True:
-            await ws.receive_text()   # keep-alive / ping
+            await ws.receive_text()   # keep-alive ping/pong
     except WebSocketDisconnect:
-        manager.disconnect(ws)
+        ws_manager.disconnect(ws)
 
 
 if __name__ == "__main__":

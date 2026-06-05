@@ -1,126 +1,99 @@
-# Airtel BTS Theft Monitoring System
+# Airtel Theft Monitoring System
 
-Real-time human intrusion detection for BTS (Base Transceiver Station) sites using YOLOv8, deployed as 4 independent microservices.
+AI-powered telecom site intrusion detection using YOLOv8, FastAPI, PostgreSQL, and Next.js.
 
 ## Architecture
 
 ```
-IP Camera (RTSP)
-      ↓
-Detection Service      ← YOLOv8 inference, person class filter
-      ↓
-Event Processor        ← Business rules (confidence, consecutive frames, restricted area)
-      ↓
-Alarm Manager          ← PostgreSQL persistence + WebSocket push + eNode REST
-      ↓
-NOC Dashboard          ← Next.js real-time alarm table (Vercel or Docker)
-      ↓ (future)
-Netcool Connector      ← GET /alarms?status=ACTIVE, no existing code changes needed
+IP Camera / Webcam
+       ↓  RTSP / cv2
+Detection Service        (YOLOv8 inference)
+       ↓  HTTP POST
+Event Processor          (business rules: confidence, consecutive frames, restricted sites)
+       ↓  HTTP POST
+Alarm Manager            (PostgreSQL + WebSocket broadcast + eNode REST)
+       ↓  WebSocket
+NOC Dashboard            (Next.js — Vercel or Docker)
+       ↓  (future)
+Netcool Integration      (plug in without touching detection code)
 ```
+
+## Services & Ports
+
+| Service           | Port | Tech              |
+|-------------------|------|-------------------|
+| Detection Service | —    | Python + YOLOv8   |
+| Event Processor   | 8001 | FastAPI           |
+| Alarm Manager     | 8002 | FastAPI + asyncpg |
+| Dashboard         | 3000 | Next.js           |
+| PostgreSQL        | 5432 | Postgres 16       |
 
 ## Quick Start
 
-### 1. Clone the repo
 ```bash
-git clone https://github.com/Akil017/Airtel-Theft-Monitoring-System.git
-cd Airtel-Theft-Monitoring-System
-```
-
-### 2. Configure environment
-```bash
+# 1. Copy env and edit your camera/site settings
 cp .env.example .env
-# Edit .env — at minimum set your RTSP_URL and CAMERA_ID
-```
 
-### 3. Run with Docker Compose
-```bash
-cd docker
+# 2. Build and run all services
 docker compose up --build
 ```
 
-| Service          | URL                          |
-|------------------|------------------------------|
-| Event Processor  | http://localhost:8001/docs   |
-| Alarm Manager    | http://localhost:8002/docs   |
-| NOC Dashboard    | http://localhost:3000        |
-| PostgreSQL       | localhost:5432               |
+- Dashboard → http://localhost:3000
+- Alarm Manager API → http://localhost:8002/docs
+- Event Processor API → http://localhost:8001/docs
 
-## Service Overview
+## Business Rules (Event Processor)
 
-### Detection Service
-- Reads RTSP stream with OpenCV
-- Runs YOLOv8 inference every frame
-- Filters: class = person, confidence ≥ `CONFIDENCE_THRESHOLD`
-- Throttles events (max 1 per `THROTTLE_SECONDS` per camera)
-- POSTs to Event Processor
+| Rule                        | Default | Env var                        |
+|-----------------------------|---------|--------------------------------|
+| Minimum confidence          | 80%     | `MIN_CONFIDENCE`               |
+| Consecutive detections      | 3       | `CONSECUTIVE_FRAMES_REQUIRED`  |
+| Restricted sites filter     | all     | `RESTRICTED_SITES`             |
 
-### Event Processor (port 8001)
-Business rules before raising an alarm:
-1. **Confidence** ≥ `MIN_CONFIDENCE` (default 80%)
-2. **Restricted area** — `SITE_ID` must be in `RESTRICTED_SITES`
-3. **Consecutive frames** — ≥ `CONSECUTIVE_FRAMES` detections within `WINDOW_SECONDS`
+## Alarm Severity Mapping
 
-### Alarm Manager (port 8002)
-- Persists alarms to PostgreSQL
-- Broadcasts new/updated alarms over WebSocket (`/ws`)
-- Optionally POSTs to eNode REST API
-- REST endpoints: `GET /alarms`, `POST /alarm`, `PATCH /alarms/{id}`
+| Confidence | Severity |
+|------------|----------|
+| ≥ 90%      | CRITICAL |
+| ≥ 75%      | MAJOR    |
+| < 75%      | MINOR    |
 
-### Dashboard (port 3000)
-- Dark NOC-style alarm table
-- Live WebSocket feed — sub-second alarm arrival
-- Filter by status (ACTIVE / ACKNOWLEDGED / CLEARED)
-- Per-alarm Acknowledge and Clear actions
+## eNode Integration
 
-## Environment Variables
+Set `ENODE_API_URL` and `ENODE_API_KEY` in `.env`.
+The Alarm Manager will POST each validated alarm to eNode automatically.
+Leave blank to skip — alarms are still stored in PostgreSQL and shown on the dashboard.
 
-| Variable             | Default                        | Description                        |
-|----------------------|--------------------------------|------------------------------------|
-| `RTSP_URL`           | rtsp://...                     | Camera stream URL                  |
-| `CAMERA_ID`          | CAM01                          | Camera identifier                  |
-| `SITE_ID`            | BTS_SITE_001                   | Site identifier                    |
-| `ZONE_ID`            | RESTRICTED_ZONE_A              | Zone within the site               |
-| `MIN_CONFIDENCE`     | 0.80                           | Minimum confidence to raise alarm  |
-| `CONSECUTIVE_FRAMES` | 3                              | Detections needed in window        |
-| `WINDOW_SECONDS`     | 30                             | Sliding window duration            |
-| `RESTRICTED_SITES`   | BTS_SITE_001,...               | Comma-separated restricted sites   |
-| `ENODE_URL`          | (blank)                        | eNode base URL — leave blank to skip |
-| `ENODE_API_KEY`      | (blank)                        | eNode API key                      |
-| `DATABASE_URL`       | postgresql://airtel:...        | PostgreSQL connection string       |
+## Future: Netcool
 
-## Deploy Dashboard to Vercel
-
-1. Go to [vercel.com](https://vercel.com) → New Project → Import from GitHub
-2. Set **Root Directory** to `dashboard`
-3. Add environment variable: `NEXT_PUBLIC_ALARM_MANAGER_URL=http://YOUR_SERVER_IP:8002`
-4. Deploy
-
-## Future Netcool Integration
-
-Add a Netcool connector that polls:
+Add a `netcool-connector` service that polls:
 ```
 GET http://alarm-manager:8002/alarms?status=ACTIVE
 ```
-No changes to existing services required.
+No changes needed in any existing service.
 
-## File Structure
+## Folder Structure
 
 ```
+airtel-theft-monitoring/
 ├── detection-service/
-│   ├── detector.py
+│   ├── detector.py          # YOLOv8 + OpenCV inference loop
+│   ├── config.py            # Settings from .env
 │   ├── requirements.txt
 │   └── Dockerfile
 ├── event-processor/
-│   ├── main.py
+│   ├── main.py              # FastAPI business rules
+│   ├── config.py
 │   ├── requirements.txt
 │   └── Dockerfile
 ├── alarm-manager/
-│   ├── main.py
+│   ├── main.py              # FastAPI + PostgreSQL + WebSocket + eNode
+│   ├── config.py
 │   ├── requirements.txt
 │   └── Dockerfile
 ├── dashboard/
 │   ├── app/
-│   │   ├── page.jsx
+│   │   ├── page.jsx         # NOC alarm table
 │   │   ├── layout.jsx
 │   │   └── globals.css
 │   ├── package.json
@@ -129,10 +102,14 @@ No changes to existing services required.
 │   ├── postcss.config.js
 │   └── Dockerfile
 ├── shared/
-│   └── models.py
-├── docker/
-│   └── docker-compose.yml
+│   └── models.py            # Pydantic models shared across services
+├── docker-compose.yml
 ├── .env.example
 ├── .gitignore
 └── README.md
 ```
+
+## Internship Context
+
+Built as part of Airtel Networks internship (Assam circle).
+Addresses real BTS site security: battery theft, diesel theft, cable theft, vandalism.

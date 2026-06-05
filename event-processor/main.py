@@ -1,155 +1,128 @@
 """
-Event Processor Service  (port 8001)
---------------------------------------
-Receives raw detection events from the Detection Service,
-applies business rules (confidence threshold, consecutive-frame
-sliding window, restricted-area check), and forwards valid
-alarm events to the Alarm Manager.
+Event Processing Service  (port 8001)
+Receives raw detection events from the YOLO service,
+applies business rules, and forwards validated alarms to the Alarm Manager.
 """
-
-import httpx
+import asyncio
 import logging
-import os
+import uuid
+import httpx
 from collections import defaultdict, deque
 from datetime import datetime, timezone
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, Field
-from typing import Optional, Deque
+from contextlib import asynccontextmanager
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [event-processor] %(levelname)s: %(message)s"
-)
+import sys, os
+sys.path.insert(0, "/shared")
+from models import DetectionEvent, SecurityAlarm, AlarmSeverity, AlarmStatus
+from config import settings
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [EVENT-PROC] %(message)s")
 log = logging.getLogger(__name__)
 
-app = FastAPI(
-    title="Event Processor",
-    description="Applies business rules to raw detection events before raising alarms.",
-    version="1.0.0"
-)
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-# ── Configuration ────────────────────────────────────────────────────────────
-ALARM_MANAGER_URL = os.getenv("ALARM_MANAGER_URL", "http://alarm-manager:8002/alarm")
-MIN_CONFIDENCE = float(os.getenv("MIN_CONFIDENCE", "0.80"))
-CONSECUTIVE_FRAMES = int(os.getenv("CONSECUTIVE_FRAMES", "3"))
-RESTRICTED_SITES = set(
-    os.getenv("RESTRICTED_SITES", "BTS_SITE_001,BTS_SITE_002,BTS_SITE_003").split(",")
-)
-WINDOW_SECONDS = int(os.getenv("WINDOW_SECONDS", "30"))
-
-# Sliding window: camera_id → deque of (timestamp, confidence) tuples
-detection_windows: dict[str, Deque] = defaultdict(lambda: deque())
+# Per-camera sliding window: stores recent confidences for frame-count rule
+camera_windows: dict[str, deque] = defaultdict(lambda: deque(maxlen=settings.CONSECUTIVE_FRAMES_REQUIRED))
 
 
-# ── Models ───────────────────────────────────────────────────────────────────
-class DetectionEvent(BaseModel):
-    camera_id: str
-    event_type: str = "HUMAN_DETECTED"
-    confidence: float = Field(..., ge=0.0, le=1.0)
-    timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
-    site_id: Optional[str] = None
-    zone_id: Optional[str] = None
-    bbox: Optional[dict] = None
-    snapshot_path: Optional[str] = None
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    log.info("Event Processing Service started")
+    yield
+    log.info("Event Processing Service stopped")
 
 
-# ── Business Rule Engine ──────────────────────────────────────────────────────
-def evaluate(event: DetectionEvent) -> tuple[bool, str]:
+app = FastAPI(title="Event Processing Service", version="1.0.0", lifespan=lifespan)
+app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
+
+
+# ─── Business rules ──────────────────────────────────────────────────────────
+
+def apply_rules(event: DetectionEvent, window: deque) -> tuple[bool, str]:
     """
     Returns (should_alarm, reason).
-    Rules (all must pass):
-      1. confidence >= MIN_CONFIDENCE
-      2. site_id in RESTRICTED_SITES
-      3. at least CONSECUTIVE_FRAMES detections within WINDOW_SECONDS
+    Rules:
+      1. confidence >= threshold
+      2. detected in N consecutive frames
+      3. site is in restricted-area list
     """
-    # Rule 1 — confidence
-    if event.confidence < MIN_CONFIDENCE:
-        return False, f"confidence {event.confidence:.2f} < threshold {MIN_CONFIDENCE}"
+    if event.confidence < settings.MIN_CONFIDENCE:
+        return False, f"confidence {event.confidence:.2f} below threshold {settings.MIN_CONFIDENCE}"
 
-    # Rule 2 — restricted area
-    if event.site_id and event.site_id not in RESTRICTED_SITES:
-        return False, f"site '{event.site_id}' is not a restricted site"
+    window.append(event.confidence)
 
-    # Rule 3 — consecutive frames / sliding window
-    window = detection_windows[event.camera_id]
-    now = event.timestamp.timestamp()
-    window.append((now, event.confidence))
+    if len(window) < settings.CONSECUTIVE_FRAMES_REQUIRED:
+        return False, f"only {len(window)}/{settings.CONSECUTIVE_FRAMES_REQUIRED} consecutive detections"
 
-    # Evict entries older than WINDOW_SECONDS
-    while window and (now - window[0][0]) > WINDOW_SECONDS:
-        window.popleft()
+    if settings.RESTRICTED_SITES and event.site_id not in settings.RESTRICTED_SITES:
+        return False, f"site {event.site_id} not in restricted list"
 
-    if len(window) < CONSECUTIVE_FRAMES:
-        return False, (
-            f"only {len(window)}/{CONSECUTIVE_FRAMES} consecutive detections "
-            f"within {WINDOW_SECONDS}s window"
-        )
-
-    return True, "all business rules passed"
+    return True, "all rules passed"
 
 
-async def forward_alarm(event: DetectionEvent, avg_confidence: float) -> None:
-    payload = {
-        "camera_id": event.camera_id,
-        "site_id": event.site_id,
-        "zone_id": event.zone_id,
-        "confidence": avg_confidence,
-        "timestamp": event.timestamp.isoformat(),
-        "snapshot_path": event.snapshot_path,
-    }
-    try:
-        async with httpx.AsyncClient() as client:
-            resp = await client.post(ALARM_MANAGER_URL, json=payload, timeout=5)
-            resp.raise_for_status()
-            log.info(f"Alarm forwarded to manager → {resp.status_code}")
-    except Exception as exc:
-        log.error(f"Failed to forward alarm: {exc}")
+def determine_severity(confidence: float) -> AlarmSeverity:
+    if confidence >= 0.90:
+        return AlarmSeverity.CRITICAL
+    if confidence >= 0.75:
+        return AlarmSeverity.MAJOR
+    return AlarmSeverity.MINOR
 
 
-# ── Routes ───────────────────────────────────────────────────────────────────
-@app.get("/health")
-def health():
-    return {"status": "ok", "service": "event-processor"}
+# ─── Routes ──────────────────────────────────────────────────────────────────
 
-
-@app.post("/detection")
+@app.post("/events/detection", status_code=202)
 async def receive_detection(event: DetectionEvent):
-    log.info(
-        f"Received event | camera={event.camera_id} "
-        f"conf={event.confidence:.2f} site={event.site_id}"
+    window = camera_windows[event.camera_id]
+    passed, reason = apply_rules(event, window)
+
+    log.info(f"[{event.camera_id}] conf={event.confidence:.2f} | rule={'PASS' if passed else 'FAIL'} | {reason}")
+
+    if not passed:
+        return {"status": "filtered", "reason": reason}
+
+    # Build alarm and forward to alarm manager
+    alarm = SecurityAlarm(
+        alarm_id=str(uuid.uuid4()),
+        site_id=event.site_id,
+        camera_id=event.camera_id,
+        severity=determine_severity(event.confidence),
+        status=AlarmStatus.ACTIVE,
+        description=f"Unauthorised person detected at {event.site_id} on {event.camera_id}",
+        confidence=event.confidence,
+        detection_count=len(window),
+        first_detected=event.timestamp,
+        last_updated=datetime.now(timezone.utc),
     )
 
-    should_alarm, reason = evaluate(event)
-    log.info(f"Evaluation → alarm={should_alarm} | reason: {reason}")
-
-    if should_alarm:
-        window = detection_windows[event.camera_id]
-        avg_conf = round(sum(c for _, c in window) / len(window), 4)
-        await forward_alarm(event, avg_conf)
-        # Reset window after alarm to avoid duplicate alarms
-        detection_windows[event.camera_id].clear()
-        return {"status": "alarm_raised", "reason": reason, "avg_confidence": avg_conf}
-
-    return {"status": "filtered", "reason": reason}
+    await forward_alarm(alarm)
+    return {"status": "alarm_raised", "alarm_id": alarm.alarm_id, "severity": alarm.severity}
 
 
-@app.get("/windows")
-def get_windows():
-    """Debug endpoint — shows current sliding window state per camera."""
+@app.get("/health")
+async def health():
+    return {"service": "event-processor", "status": "ok"}
+
+
+@app.get("/stats")
+async def stats():
     return {
-        cam: [{"ts": ts, "conf": conf} for ts, conf in list(window)]
-        for cam, window in detection_windows.items()
+        "active_cameras": len(camera_windows),
+        "camera_windows": {
+            cam: {"detections": len(w), "required": settings.CONSECUTIVE_FRAMES_REQUIRED}
+            for cam, w in camera_windows.items()
+        },
     }
 
 
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run("main:app", host="0.0.0.0", port=8001, reload=False)
+# ─── Helpers ─────────────────────────────────────────────────────────────────
+
+async def forward_alarm(alarm: SecurityAlarm):
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            r = await client.post(
+                f"{settings.ALARM_MANAGER_URL}/alarms",
+                json=alarm.model_dump(mode="json"),
+            )
+            log.info(f"Alarm forwarded → {r.status_code} | {alarm.alarm_id}")
+    except Exception as e:
+        log.error(f"Failed to forward alarm: {e}")

@@ -1,8 +1,8 @@
 import "./globals.css";
 
 export const metadata = {
-  title: "Airtel BTS — Theft Monitoring",
-  description: "NOC Dashboard for BTS site intrusion alarms",
+  title: "Airtel NOC — Theft Monitoring",
+  description: "Real-time BTS site intrusion alarm dashboard",
 };
 
 export default function RootLayout({ children }) {
