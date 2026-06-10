@@ -75,7 +75,15 @@ ANIMAL_CLASSES = {
 # ═══════════════════════════════════════════════════════════════════════════════
 #  SEVERITY
 # ═══════════════════════════════════════════════════════════════════════════════
-def get_severity(n):    return "CRITICAL" if n >= 3 else "HIGH"
+def get_severity(n):
+    if n == 0:
+        return "CLEAR"
+    elif n == 1:
+        return "MID-HIGH"
+    elif n == 2:
+        return "HIGH"
+    else:
+        return "CRITICAL"
 def get_threat(n):      return "MASS INTRUSION" if n >= 3 else "COORDINATED INTRUSION" if n == 2 else "SINGLE INTRUDER"
 def get_response(n):
     if n >= 3: return "DISPATCH MULTIPLE UNITS — MASS INTRUSION"
@@ -753,7 +761,7 @@ def main():
         detections.sort(key=lambda d: d[0], reverse=True)
         person_count = sum(1 for d in detections if d[5] == "Person")
         best_conf    = detections[0][0] if detections else 0.0
-        severity     = get_severity(person_count) if person_count > 0 else "HIGH"
+        severity     = get_severity(person_count) if person_count > 0 else "CLEAR"
 
         # ── Draw target boxes ─────────────────────────────────────────────────
         for idx, (conf_v, x1, y1, x2, y2, lbl) in enumerate(detections, 1):

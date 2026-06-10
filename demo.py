@@ -5,8 +5,13 @@ Restricted Area Intrusion Detection using YOLOv8
 
   Severity:  1-2 persons → HIGH  |  3+ persons → CRITICAL
   Model:     YOLOv8s (higher accuracy than nano)
-  HUD:       Tactical overlay
+  HUD:       Iron Man / JARVIS tactical overlay
 
+Requirements:
+  pip install ultralytics opencv-python openpyxl numpy
+
+Run:
+  python demo.py
 """
 
 import cv2
@@ -60,6 +65,7 @@ NMS_IOU_THRESHOLD    = 0.40                  # tighter NMS = fewer duplicate box
 CONSECUTIVE_REQUIRED = 3
 ALARM_COOLDOWN_SEC   = 10
 LOG_FILE             = "demo_alarms.xlsx"
+SNAPSHOT_DIR         = "snapshots"
 
 ANIMAL_CLASSES = {
     15:"Cat", 16:"Dog", 17:"Horse", 18:"Sheep",
@@ -73,7 +79,7 @@ def get_severity(n):
     if n == 0:
         return "CLEAR"
     elif n == 1:
-        return "MEDIUM"
+        return "MID-HIGH"
     elif n == 2:
         return "HIGH"
     else:
@@ -534,6 +540,17 @@ def draw_hud(frame, fps, consecutive, alarming, alarm_count,
         line(frame, (feed_w, 85), (feed_w, 85 + sweep), sev_col(severity), 2)
 
 # ═══════════════════════════════════════════════════════════════════════════════
+#  SNAPSHOT  — auto-saved to snapshots/ on every alarm trigger
+# ═══════════════════════════════════════════════════════════════════════════════
+def save_snapshot(frame, alarm_no):
+    os.makedirs(SNAPSHOT_DIR, exist_ok=True)
+    ts    = datetime.now().strftime("%Y%m%d_%H%M%S")
+    fname = os.path.join(SNAPSHOT_DIR, f"ALM-{alarm_no:04d}_{ts}.jpg")
+    cv2.imwrite(fname, frame)
+    print(f"  [SNAPSHOT] Saved: {fname}")
+    return fname
+
+# ═══════════════════════════════════════════════════════════════════════════════
 #  EXCEL LOG
 # ═══════════════════════════════════════════════════════════════════════════════
 def _fill(hex_color):
@@ -551,7 +568,7 @@ HEADERS = [
     ("Site Name",22),("Location",20),("Zone",32),("Camera ID",14),
     ("Persons Detected",10),("Threat Level",20),("Confidence (%)",12),
     ("Severity",12),("Alarm Status",16),("Duration (sec)",12),
-    ("Response Required",38),("Operator",18),("Remarks",40),
+    ("Response Required",38),("Operator",18),("Snapshot",30),("Remarks",40),
 ]
 
 def init_log():
@@ -580,7 +597,7 @@ def init_log():
     ws.auto_filter.ref = f"A2:{get_column_letter(len(HEADERS))}2"
     wb.save(LOG_FILE)
 
-def log_event(alarm_no, count, conf, severity, status, duration, remarks=""):
+def log_event(alarm_no, count, conf, severity, status, duration, remarks="", snapshot=""):
     now = datetime.now()
     wb  = load_workbook(LOG_FILE)
     ws  = wb["Alarm Log"]
@@ -597,7 +614,7 @@ def log_event(alarm_no, count, conf, severity, status, duration, remarks=""):
         round(conf * 100, 1) if conf > 0 else 0.0,
         severity, status, round(duration, 1),
         get_response(count) if count > 0 else "NO ACTION REQUIRED",
-        OPERATOR, remarks,
+        OPERATOR, snapshot, remarks,
     ]
     for col, val in enumerate(values, 1):
         c = ws.cell(row=row, column=col, value=val)
@@ -744,7 +761,7 @@ def main():
         detections.sort(key=lambda d: d[0], reverse=True)
         person_count = sum(1 for d in detections if d[5] == "Person")
         best_conf    = detections[0][0] if detections else 0.0
-        severity = get_severity(person_count) if person_count > 0 else "CLEAR"
+        severity     = get_severity(person_count) if person_count > 0 else "CLEAR"
 
         # ── Draw target boxes ─────────────────────────────────────────────────
         for idx, (conf_v, x1, y1, x2, y2, lbl) in enumerate(detections, 1):
@@ -764,12 +781,14 @@ def main():
                 alarming = True; alarm_count += 1
                 alarm_start = now; last_alarm_logged = 0
                 play_alarm(severity)
+                snap = save_snapshot(frame, alarm_count)
                 alm_id = f"ALM-{alarm_count:04d}"
                 print(f"{ts:10}  {alm_id:10}  {'INTRUSION ALARM RAISED':<30}  "
                       f"{person_count:>3}  {best_conf:>5.0%}  {severity}")
                 log_event(alarm_count, person_count, best_conf, severity,
                           "ALARM RAISED", 0.0,
-                          f"{get_threat(person_count)} — alarm triggered")
+                          f"{get_threat(person_count)} — alarm triggered",
+                          snapshot=snap)
             elif now - last_alarm_logged >= ALARM_COOLDOWN_SEC:
                 dur = now - alarm_start
                 log_event(alarm_count, person_count, best_conf, severity,
@@ -810,9 +829,15 @@ def main():
 
     cap.release()
     cv2.destroyAllWindows()
+    session_dur = int(time.time() - session_start)
+    h_s, m_s, s_s = session_dur//3600, (session_dur%3600)//60, session_dur%60
+    snaps = len(os.listdir(SNAPSHOT_DIR)) if os.path.exists(SNAPSHOT_DIR) else 0
     print("\n" + "=" * 68)
-    print(f"  Session ended  ·  Total alarms: {alarm_count}")
-    print(f"  Log: {os.path.abspath(LOG_FILE)}")
+    print(f"  SESSION SUMMARY")
+    print(f"  Duration       : {h_s:02d}:{m_s:02d}:{s_s:02d}")
+    print(f"  Total alarms   : {alarm_count}")
+    print(f"  Snapshots saved: {snaps}  ({SNAPSHOT_DIR}/)")
+    print(f"  Excel log      : {os.path.abspath(LOG_FILE)}")
     print("=" * 68 + "\n")
 
 
