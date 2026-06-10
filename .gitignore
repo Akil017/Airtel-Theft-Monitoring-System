@@ -1,8 +1,26 @@
+# Environment — never push real credentials
 .env
+
+# Python
 __pycache__/
 *.pyc
+*.pyo
+*.egg-info/
+
+# YOLO models — large files (20-80MB), don't push to GitHub
 *.pt
+*.onnx
+
+# Demo runtime outputs
+demo_alarms.xlsx
+demo_alarms.csv
+snapshots/
+screenshot_*.png
+
+# Node / Next.js
 node_modules/
 .next/
-*.egg-info/
+
+# OS
 .DS_Store
+Thumbs.db
