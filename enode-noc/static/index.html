@@ -1,0 +1,837 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Airtel NOC — BTS Security</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --red:     #E8291C;
+    --red-dim: #7a160f;
+    --amber:   #F59E0B;
+    --green:   #10B981;
+    --blue:    #3B82F6;
+    --bg:      #07090D;
+    --bg2:     #0E1118;
+    --bg3:     #161B26;
+    --border:  #1E2736;
+    --text:    #E2E8F0;
+    --muted:   #64748B;
+    --mono:    'JetBrains Mono', monospace;
+    --sans:    'Inter', sans-serif;
+  }
+
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--sans);
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+  }
+
+  /* ── HEADER ── */
+  header {
+    background: var(--bg2);
+    border-bottom: 1px solid var(--border);
+    padding: 0 2rem;
+    height: 56px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    position: sticky;
+    top: 0;
+    z-index: 100;
+  }
+
+  .header-left {
+    display: flex;
+    align-items: center;
+    gap: 1rem;
+  }
+
+  .logo-mark {
+    width: 32px; height: 32px;
+    background: var(--red);
+    border-radius: 6px;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 14px; font-weight: 700; color: #fff;
+    letter-spacing: -0.5px;
+  }
+
+  .header-title {
+    font-size: 14px;
+    font-weight: 600;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    color: var(--text);
+  }
+
+  .header-subtitle {
+    font-size: 11px;
+    color: var(--muted);
+    font-family: var(--mono);
+    margin-top: 1px;
+  }
+
+  .header-right {
+    display: flex;
+    align-items: center;
+    gap: 1.5rem;
+  }
+
+  .ws-status {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 11px;
+    font-family: var(--mono);
+    color: var(--muted);
+  }
+
+  .ws-dot {
+    width: 7px; height: 7px;
+    border-radius: 50%;
+    background: var(--muted);
+    transition: background 0.3s;
+  }
+  .ws-dot.live { background: var(--green); box-shadow: 0 0 6px var(--green); }
+
+  .clock {
+    font-family: var(--mono);
+    font-size: 12px;
+    color: var(--muted);
+    letter-spacing: 0.05em;
+  }
+
+  /* ── STAT BAR ── */
+  .stat-bar {
+    background: var(--bg2);
+    border-bottom: 1px solid var(--border);
+    padding: 0.75rem 2rem;
+    display: flex;
+    gap: 2rem;
+    align-items: center;
+  }
+
+  .stat {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+
+  .stat-value {
+    font-size: 22px;
+    font-weight: 600;
+    font-family: var(--mono);
+    line-height: 1;
+    color: var(--text);
+  }
+
+  .stat-value.red   { color: var(--red); }
+  .stat-value.amber { color: var(--amber); }
+  .stat-value.green { color: var(--green); }
+
+  .stat-label {
+    font-size: 10px;
+    font-weight: 500;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--muted);
+  }
+
+  .stat-divider {
+    width: 1px;
+    height: 32px;
+    background: var(--border);
+    margin: 0 0.5rem;
+  }
+
+  /* ── ACTIVE ALARM BANNER ── */
+  #active-banner {
+    display: none;
+    background: linear-gradient(90deg, var(--red) 0%, #c41c11 100%);
+    padding: 10px 2rem;
+    font-size: 13px;
+    font-weight: 600;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: #fff;
+    align-items: center;
+    gap: 10px;
+    animation: pulse-banner 1.5s ease-in-out infinite;
+  }
+
+  #active-banner.show { display: flex; }
+
+  @keyframes pulse-banner {
+    0%, 100% { opacity: 1; }
+    50%       { opacity: 0.85; }
+  }
+
+  .banner-icon { font-size: 16px; }
+
+  /* ── MAIN LAYOUT ── */
+  main {
+    flex: 1;
+    padding: 1.5rem 2rem;
+    display: flex;
+    flex-direction: column;
+    gap: 1.5rem;
+  }
+
+  /* ── SECTION HEADER ── */
+  .section-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 0.75rem;
+  }
+
+  .section-title {
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    color: var(--muted);
+  }
+
+  /* ── ALARM TABLE ── */
+  .table-wrap {
+    background: var(--bg2);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    overflow: hidden;
+  }
+
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 12.5px;
+  }
+
+  thead th {
+    background: var(--bg3);
+    padding: 10px 14px;
+    text-align: left;
+    font-size: 10px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--muted);
+    border-bottom: 1px solid var(--border);
+    white-space: nowrap;
+  }
+
+  tbody tr {
+    border-bottom: 1px solid var(--border);
+    transition: background 0.15s;
+  }
+
+  tbody tr:last-child { border-bottom: none; }
+  tbody tr:hover { background: var(--bg3); }
+  tbody tr.row-active { background: rgba(232,41,28,0.05); }
+  tbody tr.row-active:hover { background: rgba(232,41,28,0.09); }
+
+  td {
+    padding: 10px 14px;
+    vertical-align: middle;
+    color: var(--text);
+  }
+
+  /* ── BADGES ── */
+  .badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    padding: 3px 8px;
+    border-radius: 4px;
+    font-size: 10px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    font-family: var(--mono);
+    white-space: nowrap;
+  }
+
+  .badge-dot {
+    width: 5px; height: 5px;
+    border-radius: 50%;
+  }
+
+  .badge-critical {
+    background: rgba(232,41,28,0.15);
+    color: #f87171;
+    border: 1px solid rgba(232,41,28,0.3);
+  }
+
+  .badge-high {
+    background: rgba(245,158,11,0.12);
+    color: var(--amber);
+    border: 1px solid rgba(245,158,11,0.25);
+  }
+
+  .badge-active {
+    background: rgba(232,41,28,0.12);
+    color: #f87171;
+    border: 1px solid rgba(232,41,28,0.25);
+  }
+
+  .badge-active .badge-dot { background: var(--red); animation: blink 1.2s ease-in-out infinite; }
+  @keyframes blink { 0%,100% { opacity:1; } 50% { opacity:0.2; } }
+
+  .badge-acked {
+    background: rgba(59,130,246,0.12);
+    color: #93c5fd;
+    border: 1px solid rgba(59,130,246,0.25);
+  }
+
+  .badge-cleared {
+    background: rgba(16,185,129,0.10);
+    color: #6ee7b7;
+    border: 1px solid rgba(16,185,129,0.2);
+  }
+
+  /* ── THREAT PILL ── */
+  .threat {
+    font-family: var(--mono);
+    font-size: 10px;
+    font-weight: 500;
+    color: var(--muted);
+    letter-spacing: 0.03em;
+    white-space: nowrap;
+  }
+
+  /* ── TIME ── */
+  .time-cell {
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--muted);
+    white-space: nowrap;
+  }
+
+  /* ── SOURCE ── */
+  .source-cell {
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--text);
+  }
+
+  /* ── ACTION BUTTONS ── */
+  .btn-group {
+    display: flex;
+    gap: 6px;
+  }
+
+  .btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 5px 10px;
+    border-radius: 5px;
+    border: 1px solid transparent;
+    font-size: 11px;
+    font-weight: 500;
+    cursor: pointer;
+    transition: all 0.15s;
+    font-family: var(--sans);
+    white-space: nowrap;
+  }
+
+  .btn-clear {
+    background: rgba(16,185,129,0.1);
+    color: #6ee7b7;
+    border-color: rgba(16,185,129,0.25);
+  }
+  .btn-clear:hover {
+    background: rgba(16,185,129,0.2);
+    border-color: rgba(16,185,129,0.4);
+  }
+
+  .btn-ack {
+    background: rgba(59,130,246,0.1);
+    color: #93c5fd;
+    border-color: rgba(59,130,246,0.25);
+  }
+  .btn-ack:hover {
+    background: rgba(59,130,246,0.2);
+    border-color: rgba(59,130,246,0.4);
+  }
+
+  .btn-disabled {
+    opacity: 0.35;
+    cursor: not-allowed;
+    pointer-events: none;
+  }
+
+  /* ── EMPTY STATE ── */
+  .empty-state {
+    padding: 4rem 2rem;
+    text-align: center;
+    color: var(--muted);
+    font-size: 13px;
+  }
+
+  .empty-icon {
+    font-size: 36px;
+    margin-bottom: 12px;
+    opacity: 0.3;
+  }
+
+  /* ── TOAST ── */
+  #toast-container {
+    position: fixed;
+    bottom: 1.5rem;
+    right: 1.5rem;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    z-index: 999;
+  }
+
+  .toast {
+    background: var(--bg3);
+    border: 1px solid var(--border);
+    border-radius: 7px;
+    padding: 10px 14px;
+    font-size: 12px;
+    color: var(--text);
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    animation: slide-in 0.2s ease-out;
+    min-width: 260px;
+    max-width: 360px;
+  }
+
+  .toast.toast-red    { border-left: 3px solid var(--red); }
+  .toast.toast-green  { border-left: 3px solid var(--green); }
+  .toast.toast-blue   { border-left: 3px solid var(--blue); }
+
+  @keyframes slide-in {
+    from { transform: translateX(20px); opacity: 0; }
+    to   { transform: translateX(0);    opacity: 1; }
+  }
+
+  /* ── MODAL ── */
+  .modal-overlay {
+    display: none;
+    position: fixed;
+    inset: 0;
+    background: rgba(0,0,0,0.7);
+    z-index: 200;
+    align-items: center;
+    justify-content: center;
+  }
+
+  .modal-overlay.open { display: flex; }
+
+  .modal {
+    background: var(--bg2);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 1.5rem;
+    width: 420px;
+    max-width: 90vw;
+  }
+
+  .modal-title {
+    font-size: 14px;
+    font-weight: 600;
+    margin-bottom: 0.75rem;
+    color: var(--text);
+  }
+
+  .modal-desc {
+    font-size: 12px;
+    color: var(--muted);
+    margin-bottom: 1rem;
+    line-height: 1.6;
+  }
+
+  .modal-field {
+    margin-bottom: 0.75rem;
+  }
+
+  .modal-label {
+    display: block;
+    font-size: 10px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--muted);
+    margin-bottom: 5px;
+  }
+
+  .modal-input {
+    width: 100%;
+    background: var(--bg3);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 8px 10px;
+    font-size: 13px;
+    color: var(--text);
+    font-family: var(--sans);
+    outline: none;
+    transition: border-color 0.15s;
+  }
+  .modal-input:focus { border-color: var(--blue); }
+
+  .modal-actions {
+    display: flex;
+    gap: 8px;
+    justify-content: flex-end;
+    margin-top: 1.25rem;
+  }
+
+  .btn-modal-cancel {
+    background: transparent;
+    color: var(--muted);
+    border: 1px solid var(--border);
+  }
+  .btn-modal-cancel:hover { background: var(--bg3); color: var(--text); }
+
+  .btn-modal-confirm {
+    background: var(--green);
+    color: #fff;
+    border: 1px solid transparent;
+  }
+  .btn-modal-confirm:hover { opacity: 0.88; }
+
+  .alarm-ref {
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--amber);
+    background: rgba(245,158,11,0.08);
+    padding: 4px 8px;
+    border-radius: 4px;
+    margin-bottom: 0.75rem;
+    display: inline-block;
+  }
+
+  /* ── SCROLLBAR ── */
+  ::-webkit-scrollbar { width: 5px; height: 5px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 99px; }
+</style>
+</head>
+<body>
+
+<!-- HEADER -->
+<header>
+  <div class="header-left">
+    <div class="logo-mark">A</div>
+    <div>
+      <div class="header-title">Airtel NOC — BTS Security</div>
+      <div class="header-subtitle">Assam Circle · Intrusion Monitoring</div>
+    </div>
+  </div>
+  <div class="header-right">
+    <div class="ws-status">
+      <div class="ws-dot" id="ws-dot"></div>
+      <span id="ws-label">Connecting…</span>
+    </div>
+    <div class="clock" id="clock">--:--:--</div>
+  </div>
+</header>
+
+<!-- ACTIVE ALARM BANNER -->
+<div id="active-banner">
+  <span class="banner-icon">⚠</span>
+  <span id="banner-text">ACTIVE ALARM — DISPATCH REQUIRED</span>
+</div>
+
+<!-- STAT BAR -->
+<div class="stat-bar">
+  <div class="stat">
+    <div class="stat-value red" id="stat-active">0</div>
+    <div class="stat-label">Active</div>
+  </div>
+  <div class="stat-divider"></div>
+  <div class="stat">
+    <div class="stat-value amber" id="stat-total">0</div>
+    <div class="stat-label">Total Today</div>
+  </div>
+  <div class="stat-divider"></div>
+  <div class="stat">
+    <div class="stat-value green" id="stat-cleared">0</div>
+    <div class="stat-label">Cleared</div>
+  </div>
+  <div class="stat-divider"></div>
+  <div class="stat">
+    <div class="stat-value" id="stat-clients">0</div>
+    <div class="stat-label">NOC Clients</div>
+  </div>
+</div>
+
+<!-- MAIN -->
+<main>
+  <div>
+    <div class="section-header">
+      <div class="section-title">Alarm Feed</div>
+    </div>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>Alarm ID</th>
+            <th>Status</th>
+            <th>Severity</th>
+            <th>Threat</th>
+            <th>Source</th>
+            <th>Description</th>
+            <th>Time</th>
+            <th>Actions</th>
+          </tr>
+        </thead>
+        <tbody id="alarm-tbody">
+          <tr>
+            <td colspan="8">
+              <div class="empty-state">
+                <div class="empty-icon">📡</div>
+                <div>No alarms received yet.</div>
+                <div style="margin-top:4px;font-size:11px;">Feed is live — waiting for events.</div>
+              </div>
+            </td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</main>
+
+<!-- TOAST CONTAINER -->
+<div id="toast-container"></div>
+
+<!-- CLEAR MODAL -->
+<div class="modal-overlay" id="clear-modal">
+  <div class="modal">
+    <div class="modal-title">✅ Clear Alarm</div>
+    <div class="alarm-ref" id="modal-alarm-ref">—</div>
+    <div class="modal-desc">
+      This confirms the field technician has physically validated the site.
+      The hooter will stop immediately on confirmation.
+    </div>
+    <div class="modal-field">
+      <label class="modal-label" for="clear-operator">Your NOC ID / Name</label>
+      <input class="modal-input" id="clear-operator" placeholder="e.g. NOC-ASM-01" />
+    </div>
+    <div class="modal-field">
+      <label class="modal-label" for="clear-reason">Reason</label>
+      <input class="modal-input" id="clear-reason" placeholder="e.g. False alarm — animal, Tech confirmed all clear" />
+    </div>
+    <div class="modal-actions">
+      <button class="btn btn-modal-cancel" onclick="closeModal()">Cancel</button>
+      <button class="btn btn-modal-confirm" onclick="confirmClear()">Confirm Clear & Stop Hooter</button>
+    </div>
+  </div>
+</div>
+
+<script>
+const BASE = window.location.origin;
+const WS_URL = BASE.replace(/^http/, 'ws') + '/ws';
+
+let alarms = {};
+let activeModalAlarmId = null;
+
+// ── WebSocket ──────────────────────────────────────────────────────────────
+let ws;
+function connectWS() {
+  ws = new WebSocket(WS_URL);
+
+  ws.onopen = () => {
+    document.getElementById('ws-dot').classList.add('live');
+    document.getElementById('ws-label').textContent = 'Live';
+  };
+
+  ws.onmessage = (e) => {
+    const msg = JSON.parse(e.data);
+    if (msg.event === 'ALARM_RECEIVED') {
+      const a = msg.alarm;
+      alarms[a.alarmId] = a;
+      toast(`🚨 ${a.severity} — ${a.threatLevel || 'INTRUSION'} @ ${a.source}`, 'red');
+    } else if (msg.event === 'ALARM_CLEARED') {
+      if (alarms[msg.alarmId]) {
+        alarms[msg.alarmId].status = 'CLEARED';
+        alarms[msg.alarmId].clearedBy = msg.operator;
+      }
+      toast(`✅ Cleared by ${msg.operator}: ${msg.alarmId}`, 'green');
+    }
+    renderTable();
+    updateStats();
+  };
+
+  ws.onclose = () => {
+    document.getElementById('ws-dot').classList.remove('live');
+    document.getElementById('ws-label').textContent = 'Reconnecting…';
+    setTimeout(connectWS, 3000);
+  };
+}
+
+// ── Initial load ──────────────────────────────────────────────────────────
+async function loadAlarms() {
+  try {
+    const r = await fetch(`${BASE}/api/alarms`);
+    const data = await r.json();
+    data.forEach(a => { alarms[a.alarmId] = a; });
+    renderTable();
+    updateStats();
+  } catch(e) { console.error(e); }
+}
+
+async function loadStats() {
+  try {
+    const r = await fetch(`${BASE}/api/stats`);
+    const s = await r.json();
+    document.getElementById('stat-clients').textContent = s.ws_clients ?? 0;
+  } catch(e) {}
+}
+
+// ── Render ────────────────────────────────────────────────────────────────
+function renderTable() {
+  const tbody = document.getElementById('alarm-tbody');
+  const list = Object.values(alarms).sort((a,b) =>
+    new Date(b.receivedAt) - new Date(a.receivedAt));
+
+  if (!list.length) {
+    tbody.innerHTML = `<tr><td colspan="8">
+      <div class="empty-state">
+        <div class="empty-icon">📡</div>
+        <div>No alarms received yet.</div>
+        <div style="margin-top:4px;font-size:11px;">Feed is live — waiting for events.</div>
+      </div></td></tr>`;
+    return;
+  }
+
+  tbody.innerHTML = list.map(a => {
+    const isActive = a.status === 'ACTIVE';
+    const isAcked  = a.status === 'ACKNOWLEDGED';
+
+    const statusBadge = isActive
+      ? `<span class="badge badge-active"><span class="badge-dot"></span>Active</span>`
+      : isAcked
+      ? `<span class="badge badge-acked">Acknowledged</span>`
+      : `<span class="badge badge-cleared">Cleared</span>`;
+
+    const sevBadge = a.severity === 'CRITICAL'
+      ? `<span class="badge badge-critical">Critical</span>`
+      : `<span class="badge badge-high">High</span>`;
+
+    const actions = isActive || isAcked
+      ? `<div class="btn-group">
+           <button class="btn btn-clear" onclick="openClearModal('${a.alarmId}')">
+             ✓ Clear
+           </button>
+         </div>`
+      : `<span style="font-size:11px;color:var(--muted);font-family:var(--mono);">
+           ${a.clearedBy || '—'}
+         </span>`;
+
+    const t = new Date(a.receivedAt);
+    const timeStr = t.toLocaleTimeString('en-IN', {hour:'2-digit', minute:'2-digit', second:'2-digit'});
+    const dateStr = t.toLocaleDateString('en-IN', {day:'2-digit', month:'short'});
+
+    return `<tr class="${isActive ? 'row-active' : ''}">
+      <td><span style="font-family:var(--mono);font-size:11px;color:var(--amber);">${a.alarmId}</span></td>
+      <td>${statusBadge}</td>
+      <td>${sevBadge}</td>
+      <td><span class="threat">${a.threatLevel || '—'}</span></td>
+      <td><span class="source-cell">${a.source || '—'}</span></td>
+      <td style="max-width:220px;font-size:11px;color:var(--muted);">${a.description || '—'}</td>
+      <td class="time-cell">${timeStr}<br><span style="font-size:10px;">${dateStr}</span></td>
+      <td>${actions}</td>
+    </tr>`;
+  }).join('');
+}
+
+function updateStats() {
+  const list = Object.values(alarms);
+  const active  = list.filter(a => a.status === 'ACTIVE').length;
+  const total   = list.length;
+  const cleared = list.filter(a => a.status === 'CLEARED').length;
+
+  document.getElementById('stat-active').textContent  = active;
+  document.getElementById('stat-total').textContent   = total;
+  document.getElementById('stat-cleared').textContent = cleared;
+
+  const banner = document.getElementById('active-banner');
+  if (active > 0) {
+    banner.classList.add('show');
+    document.getElementById('banner-text').textContent =
+      `${active} ACTIVE ALARM${active > 1 ? 'S' : ''} — DISPATCH REQUIRED`;
+  } else {
+    banner.classList.remove('show');
+  }
+}
+
+// ── Modal ─────────────────────────────────────────────────────────────────
+function openClearModal(alarmId) {
+  activeModalAlarmId = alarmId;
+  document.getElementById('modal-alarm-ref').textContent = `Alarm: ${alarmId}`;
+  document.getElementById('clear-operator').value = '';
+  document.getElementById('clear-reason').value = '';
+  document.getElementById('clear-modal').classList.add('open');
+}
+
+function closeModal() {
+  document.getElementById('clear-modal').classList.remove('open');
+  activeModalAlarmId = null;
+}
+
+async function confirmClear() {
+  const operator = document.getElementById('clear-operator').value.trim();
+  const reason   = document.getElementById('clear-reason').value.trim();
+  if (!operator) {
+    document.getElementById('clear-operator').focus();
+    return;
+  }
+  closeModal();
+  try {
+    await fetch(`${BASE}/api/alarms/${activeModalAlarmId || ''}/clear`, {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ operator, reason })
+    });
+    // WS broadcast will update UI
+  } catch(e) {
+    toast('Clear request failed — check server', 'red');
+  }
+}
+
+// Close modal on overlay click
+document.getElementById('clear-modal').addEventListener('click', (e) => {
+  if (e.target === e.currentTarget) closeModal();
+});
+
+// ── Toast ─────────────────────────────────────────────────────────────────
+function toast(msg, type = 'blue') {
+  const el = document.createElement('div');
+  el.className = `toast toast-${type}`;
+  el.textContent = msg;
+  document.getElementById('toast-container').appendChild(el);
+  setTimeout(() => el.remove(), 5000);
+}
+
+// ── Clock ─────────────────────────────────────────────────────────────────
+function updateClock() {
+  const now = new Date();
+  document.getElementById('clock').textContent =
+    now.toLocaleTimeString('en-IN', {hour:'2-digit', minute:'2-digit', second:'2-digit'});
+}
+setInterval(updateClock, 1000);
+updateClock();
+
+// ── Refresh stats every 30s ───────────────────────────────────────────────
+setInterval(loadStats, 30000);
+
+// ── Init ──────────────────────────────────────────────────────────────────
+loadAlarms();
+loadStats();
+connectWS();
+</script>
+</body>
+</html>

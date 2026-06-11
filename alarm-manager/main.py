@@ -2,10 +2,14 @@
 Alarm Manager Service  (port 8002)
 ------------------------------------
 Persists alarms to PostgreSQL, broadcasts over WebSocket,
-integrates with eNode REST API (optional).
+integrates with eNode NOC REST API.
 
-Updated schema includes: threat_level, person_count,
-animal_count, response, snapshot_path.
+NOC Operators can:
+  - Acknowledge an alarm (tech dispatched)
+  - Clear an alarm (tech validated, work done, hooter stopped)
+
+Hooter stop: on CLEAR, alarm-manager calls detector's /hooter/stop
+endpoint so the relay turns off immediately.
 """
 import asyncio, logging, httpx
 from datetime import datetime, timezone
@@ -25,7 +29,6 @@ logging.basicConfig(level=logging.INFO,
     format="%(asctime)s [ALARM-MGR] %(levelname)s: %(message)s")
 log = logging.getLogger(__name__)
 
-# ── DB Schema ─────────────────────────────────────────────────────────────────
 CREATE_TABLE = """
 CREATE TABLE IF NOT EXISTS alarms (
     alarm_id        TEXT PRIMARY KEY,
@@ -44,11 +47,14 @@ CREATE TABLE IF NOT EXISTS alarms (
     last_updated    TIMESTAMPTZ NOT NULL,
     cleared_at      TIMESTAMPTZ,
     snapshot_path   TEXT,
-    enode_alarm_id  TEXT
+    enode_alarm_id  TEXT,
+    ack_operator    TEXT,
+    ack_note        TEXT,
+    clear_operator  TEXT,
+    clear_reason    TEXT
 );
 """
 
-# ── WebSocket manager ─────────────────────────────────────────────────────────
 class WSManager:
     def __init__(self):
         self._clients: List[WebSocket] = []
@@ -61,7 +67,6 @@ class WSManager:
     def disconnect(self, ws: WebSocket):
         if ws in self._clients:
             self._clients.remove(ws)
-        log.info(f"WS disconnected. Total: {len(self._clients)}")
 
     async def broadcast(self, payload: dict):
         dead = []
@@ -82,7 +87,6 @@ ws_manager = WSManager()
 db_pool: asyncpg.Pool = None
 
 
-# ── App lifespan ──────────────────────────────────────────────────────────────
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global db_pool
@@ -135,24 +139,57 @@ async def post_to_enode(alarm: dict) -> Optional[str]:
         return None
 
 
+async def notify_enode_clear(alarm_id: str, enode_alarm_id: str, operator: str, reason: str):
+    """Tell eNode NOC that this alarm has been cleared by an operator."""
+    if not settings.ENODE_API_URL or not enode_alarm_id:
+        return
+    try:
+        headers = {"X-API-Key": settings.ENODE_API_KEY or ""}
+        async with httpx.AsyncClient(timeout=10) as client:
+            await client.post(
+                f"{settings.ENODE_API_URL}/api/alarms/{enode_alarm_id}/clear",
+                json={"operator": operator, "reason": reason},
+                headers=headers
+            )
+    except Exception as exc:
+        log.error(f"eNode clear notify error: {exc}")
+
+
+async def stop_hooter_on_camera(camera_id: str):
+    """
+    Tell detection-service to stop the hooter for this camera.
+    Called when NOC operator clears an alarm after tech validates the site.
+    """
+    if not settings.DETECTION_SERVICE_URL:
+        return
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            r = await client.post(
+                f"{settings.DETECTION_SERVICE_URL}/hooter/stop",
+                json={"camera_id": camera_id}
+            )
+            log.info(f"Hooter stop sent for {camera_id} → {r.status_code}")
+    except Exception as exc:
+        log.warning(f"Hooter stop failed for {camera_id}: {exc}")
+
+
 # ── Routes ────────────────────────────────────────────────────────────────────
 @app.get("/health")
 async def health():
     return {"service": "alarm-manager", "status": "ok", "ws_clients": ws_manager.count}
-
 
 @app.get("/stats")
 async def get_stats():
     async with db_pool.acquire() as conn:
         total  = await conn.fetchval("SELECT COUNT(*) FROM alarms")
         active = await conn.fetchval("SELECT COUNT(*) FROM alarms WHERE status='ACTIVE'")
-    return {"total_alarms": total, "active_alarms": active, "ws_clients": ws_manager.count}
-
+        acked  = await conn.fetchval("SELECT COUNT(*) FROM alarms WHERE status='ACKNOWLEDGED'")
+    return {"total_alarms": total, "active_alarms": active,
+            "acknowledged_alarms": acked, "ws_clients": ws_manager.count}
 
 @app.post("/alarms", status_code=201)
 async def create_alarm(alarm: SecurityAlarm):
     enode_id = await post_to_enode(alarm.model_dump(mode="json"))
-
     sev = alarm.severity if isinstance(alarm.severity, str) else alarm.severity.value
     sta = alarm.status   if isinstance(alarm.status,   str) else alarm.status.value
 
@@ -164,9 +201,8 @@ async def create_alarm(alarm: SecurityAlarm):
                 person_count, animal_count, detection_count,
                 response, first_detected, last_updated,
                 snapshot_path, enode_alarm_id
-            ) VALUES (
-                $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16
-            ) ON CONFLICT (alarm_id) DO NOTHING
+            ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
+            ON CONFLICT (alarm_id) DO NOTHING
         """,
         alarm.alarm_id, alarm.site_id, alarm.camera_id, sev, sta,
         alarm.threat_level, alarm.description, alarm.confidence,
@@ -176,9 +212,8 @@ async def create_alarm(alarm: SecurityAlarm):
 
     payload = {**alarm.model_dump(mode="json"), "enode_alarm_id": enode_id}
     await ws_manager.broadcast({"event": "ALARM_CREATED", "alarm": payload})
-    log.info(f"Alarm created: {alarm.alarm_id} | {sev} | {alarm.threat_level} | {alarm.site_id}")
+    log.info(f"Alarm created: {alarm.alarm_id} | {sev} | {alarm.threat_level}")
     return payload
-
 
 @app.get("/alarms")
 async def list_alarms(status: Optional[str] = None, limit: int = 100):
@@ -192,31 +227,62 @@ async def list_alarms(status: Optional[str] = None, limit: int = 100):
                 "SELECT * FROM alarms ORDER BY first_detected DESC LIMIT $1", limit)
     return [dict(r) for r in rows]
 
-
 @app.post("/alarms/acknowledge")
 async def acknowledge_alarm(req: AlarmAckRequest):
+    """
+    NOC operator acknowledges — tech has been dispatched to site.
+    Hooter keeps ringing until Clear.
+    """
     async with db_pool.acquire() as conn:
         row = await conn.fetchrow(
-            "UPDATE alarms SET status='ACKNOWLEDGED', last_updated=$1 WHERE alarm_id=$2 RETURNING *",
-            datetime.now(timezone.utc), req.alarm_id)
+            """UPDATE alarms
+               SET status='ACKNOWLEDGED', last_updated=$1,
+                   ack_operator=$2, ack_note=$3
+               WHERE alarm_id=$4 AND status='ACTIVE'
+               RETURNING *""",
+            datetime.now(timezone.utc), req.operator_id, req.note, req.alarm_id)
     if not row:
-        raise HTTPException(404, f"Alarm {req.alarm_id} not found")
-    await ws_manager.broadcast({"event": "ALARM_ACKNOWLEDGED", "alarm_id": req.alarm_id})
+        raise HTTPException(404, f"Alarm {req.alarm_id} not found or already actioned")
+    await ws_manager.broadcast({"event": "ALARM_ACKNOWLEDGED",
+                                 "alarm_id": req.alarm_id,
+                                 "operator": req.operator_id})
     return {"status": "acknowledged", "alarm_id": req.alarm_id}
-
 
 @app.post("/alarms/clear")
 async def clear_alarm(req: AlarmClearRequest):
+    """
+    NOC operator clears — tech has physically validated site, work confirmed real/false.
+    This stops the hooter immediately via the detection service.
+    """
     now = datetime.now(timezone.utc)
     async with db_pool.acquire() as conn:
         row = await conn.fetchrow(
-            "UPDATE alarms SET status='CLEARED', cleared_at=$1, last_updated=$1 WHERE alarm_id=$2 RETURNING *",
-            now, req.alarm_id)
+            """UPDATE alarms
+               SET status='CLEARED', cleared_at=$1, last_updated=$1,
+                   clear_operator=$2, clear_reason=$3
+               WHERE alarm_id=$4
+               RETURNING *""",
+            now, req.operator_id, req.reason, req.alarm_id)
     if not row:
         raise HTTPException(404, f"Alarm {req.alarm_id} not found")
-    await ws_manager.broadcast({"event": "ALARM_CLEARED", "alarm_id": req.alarm_id})
-    return {"status": "cleared", "alarm_id": req.alarm_id}
 
+    alarm_data = dict(row)
+
+    # Stop the hooter on the physical camera
+    await stop_hooter_on_camera(alarm_data["camera_id"])
+
+    # Notify eNode if integrated
+    if alarm_data.get("enode_alarm_id"):
+        await notify_enode_clear(
+            req.alarm_id, alarm_data["enode_alarm_id"],
+            req.operator_id, req.reason or "Cleared by NOC"
+        )
+
+    await ws_manager.broadcast({"event": "ALARM_CLEARED",
+                                 "alarm_id": req.alarm_id,
+                                 "operator": req.operator_id,
+                                 "reason": req.reason})
+    return {"status": "cleared", "alarm_id": req.alarm_id}
 
 @app.websocket("/ws")
 async def websocket_endpoint(ws: WebSocket):
@@ -226,7 +292,6 @@ async def websocket_endpoint(ws: WebSocket):
             await ws.receive_text()
     except WebSocketDisconnect:
         ws_manager.disconnect(ws)
-
 
 if __name__ == "__main__":
     import uvicorn

@@ -5,13 +5,7 @@ Restricted Area Intrusion Detection using YOLOv8
 
   Severity:  1-2 persons → HIGH  |  3+ persons → CRITICAL
   Model:     YOLOv8s (higher accuracy than nano)
-  HUD:       Iron Man / JARVIS tactical overlay
-
-Requirements:
-  pip install ultralytics opencv-python openpyxl numpy
-
-Run:
-  python demo.py
+  HUD:       Tactical overlay
 """
 
 import cv2

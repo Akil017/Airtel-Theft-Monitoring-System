@@ -27,7 +27,9 @@ services:
     env_file: .env
     environment:
       EVENT_PROCESSOR_URL: http://event-processor:8001
-    # Webcam passthrough — REMOVE this block if using RTSP only
+    ports:
+      - "8003:8003"   # hooter stop endpoint — alarm-manager calls this
+    # Webcam passthrough — uncomment if using local camera instead of RTSP
     # devices:
     #   - /dev/video0:/dev/video0
     depends_on:
@@ -56,7 +58,8 @@ services:
     restart: unless-stopped
     env_file: .env
     environment:
-      DATABASE_URL: postgresql+asyncpg://airtel:airtel@postgres:5432/airtel_monitor
+      DATABASE_URL:          postgresql+asyncpg://airtel:airtel@postgres:5432/airtel_monitor
+      DETECTION_SERVICE_URL: http://detection-service:8003
     ports:
       - "8002:8002"
     depends_on:
@@ -65,6 +68,15 @@ services:
     volumes:
       - ./alarm-manager:/app
       - ./shared:/shared
+
+  enode-noc:
+    build: ./enode-noc
+    container_name: airtel-enode-noc
+    restart: unless-stopped
+    ports:
+      - "9000:9000"   # NOC dashboard → http://localhost:9000
+    # No DB needed — in-memory store for temp deployment
+    # Swap for PostgreSQL version when going permanent
 
   dashboard:
     build: ./dashboard
@@ -75,7 +87,7 @@ services:
       NEXT_PUBLIC_ALARM_MANAGER_WS:  ws://localhost:8002/ws
       NEXT_PUBLIC_ALARM_MANAGER_URL: http://localhost:8002
     ports:
-      - "3000:3000"
+      - "3000:3000"   # Internal NOC dashboard (your existing one)
     depends_on:
       - alarm-manager
 
