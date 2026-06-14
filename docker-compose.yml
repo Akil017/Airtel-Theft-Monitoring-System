@@ -2,6 +2,21 @@ version: "3.9"
 
 services:
 
+  # ── RTMP Server ─────────────────────────────────────────────────────────────
+  # Receives live stream pushed from CP Plus EZ-S35T camera
+  # Camera RTMP URL to set in EzyLiv+ app:
+  #   rtmp://49.37.110.161:1935/live/bts01
+  rtmp-server:
+    build: ./rtmp-server
+    container_name: airtel-rtmp
+    restart: unless-stopped
+    ports:
+      - "1935:1935"    # RTMP ingest — camera pushes here
+      - "8080:8080"    # HLS preview — watch stream in browser
+    volumes:
+      - /tmp/hls:/tmp/hls
+
+  # ── PostgreSQL ───────────────────────────────────────────────────────────────
   postgres:
     image: postgres:16-alpine
     container_name: airtel-postgres
@@ -20,6 +35,9 @@ services:
       timeout:  5s
       retries:  5
 
+  # ── Detection Service ────────────────────────────────────────────────────────
+  # Reads from RTMP server, runs YOLOv8s, posts events to event-processor
+  # Also controls CP Plus hooter via Tuya/HTTP API
   detection-service:
     build: ./detection-service
     container_name: airtel-detector
@@ -27,16 +45,15 @@ services:
     env_file: .env
     environment:
       EVENT_PROCESSOR_URL: http://event-processor:8001
-    ports:
-      - "8003:8003"   # hooter stop endpoint — alarm-manager calls this
-    # Webcam passthrough — uncomment if using local camera instead of RTSP
-    # devices:
-    #   - /dev/video0:/dev/video0
+      # Reads RTMP stream from rtmp-server container
+      RTSP_URL: rtmp://rtmp-server:1935/live/bts01
     depends_on:
       - event-processor
+      - rtmp-server
     volumes:
       - ./detection-service:/app
 
+  # ── Event Processor ──────────────────────────────────────────────────────────
   event-processor:
     build: ./event-processor
     container_name: airtel-event-proc
@@ -52,14 +69,14 @@ services:
       - ./event-processor:/app
       - ./shared:/shared
 
+  # ── Alarm Manager ────────────────────────────────────────────────────────────
   alarm-manager:
     build: ./alarm-manager
     container_name: airtel-alarm-mgr
     restart: unless-stopped
     env_file: .env
     environment:
-      DATABASE_URL:          postgresql+asyncpg://airtel:airtel@postgres:5432/airtel_monitor
-      DETECTION_SERVICE_URL: http://detection-service:8003
+      DATABASE_URL: postgresql+asyncpg://airtel:airtel@postgres:5432/airtel_monitor
     ports:
       - "8002:8002"
     depends_on:
@@ -69,25 +86,28 @@ services:
       - ./alarm-manager:/app
       - ./shared:/shared
 
-  enode-noc:
-    build: ./enode-noc
-    container_name: airtel-enode-noc
-    restart: unless-stopped
-    ports:
-      - "9000:9000"   # NOC dashboard → http://localhost:9000
-    # No DB needed — in-memory store for temp deployment
-    # Swap for PostgreSQL version when going permanent
-
+  # ── NOC Dashboard ─────────────────────────────────────────────────────────────
   dashboard:
     build: ./dashboard
     container_name: airtel-dashboard
     restart: unless-stopped
     env_file: .env
     environment:
-      NEXT_PUBLIC_ALARM_MANAGER_WS:  ws://localhost:8002/ws
-      NEXT_PUBLIC_ALARM_MANAGER_URL: http://localhost:8002
+      NEXT_PUBLIC_ALARM_MANAGER_WS:  ws://49.37.110.161:8002/ws
+      NEXT_PUBLIC_ALARM_MANAGER_URL: http://49.37.110.161:8002
     ports:
-      - "3000:3000"   # Internal NOC dashboard (your existing one)
+      - "3000:3000"
+    depends_on:
+      - alarm-manager
+
+  # ── eNode NOC Server ──────────────────────────────────────────────────────────
+  enode-noc:
+    build: ./enode-noc
+    container_name: airtel-enode
+    restart: unless-stopped
+    env_file: .env
+    ports:
+      - "9000:9000"
     depends_on:
       - alarm-manager
 
