@@ -155,12 +155,19 @@ class DetectionService:
 
     def open_stream(self):
         source = settings.RTSP_URL if settings.RTSP_URL else 0
-        cap    = cv2.VideoCapture(source)
+
+        cap = cv2.VideoCapture(source, cv2.CAP_FFMPEG)
+
+        for _ in range(20):
+            if cap.isOpened():
+                break
+            time.sleep(0.5)
+
         if not cap.isOpened():
             raise RuntimeError(f"Cannot open stream: {source}")
+
         log.info(f"Stream opened: {source}")
         return cap
-
     def build_event(self, conf: float, label: str, bbox: list) -> dict:
         return {
             "camera_id":  settings.CAMERA_ID,

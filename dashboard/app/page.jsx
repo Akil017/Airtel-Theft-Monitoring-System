@@ -1,8 +1,8 @@
 "use client";
 import { useEffect, useState, useRef, useCallback } from "react";
 
-const WS_URL  = process.env.NEXT_PUBLIC_ALARM_MANAGER_WS  ?? "ws://localhost:8002/ws";
-const API_URL = process.env.NEXT_PUBLIC_ALARM_MANAGER_URL ?? "http://localhost:8002";
+const WS_URL  = process.env.NEXT_PUBLIC_ALARM_MANAGER_WS  ?? "ws://74.225.144.11:8002/ws";
+const API_URL = process.env.NEXT_PUBLIC_ALARM_MANAGER_URL ?? "http://74.225.144.11:8002";
 const RTMP_STAT_URL = process.env.NEXT_PUBLIC_RTMP_STAT_URL ?? "http://localhost:8080";
 
 const SEV_STYLE = {
@@ -30,8 +30,8 @@ function AlarmModal({ alarm, onClose, onAck, onClear, rtmpStatUrl }) {
   const [activeTab, setActiveTab] = useState("details");
   const [streamActive, setStreamActive] = useState(false);
 
-  const hlsUrl = `${rtmpStatUrl.replace(':8080','')}/hls/bts01.m3u8`;
-  const streamPreviewUrl = `${rtmpStatUrl}/hls/bts01.m3u8`;
+  const hlsUrl = `http://74.225.144.11:8080/hls/bts01.m3u8`;
+  const streamPreviewUrl = `http://74.225.144.11:8080/hls/bts01.m3u8`;
 
   if (!alarm) return null;
 
@@ -177,13 +177,10 @@ function AlarmModal({ alarm, onClose, onAck, onClear, rtmpStatUrl }) {
               {/* HLS stream player */}
               <div className="bg-black rounded-lg overflow-hidden border border-gray-700 aspect-video flex items-center justify-center">
                 {streamActive ? (
-                  <video
-                    autoPlay
-                    muted
-                    controls
+                  <iframe
                     className="w-full h-full"
-                    src={streamPreviewUrl}
-                    onError={() => setStreamActive(false)}
+                    src={`http://74.225.144.11:8080/player.html`}
+                    allowFullScreen
                   />
                 ) : (
                   <div className="flex flex-col items-center gap-4 text-gray-600">
@@ -208,7 +205,7 @@ function AlarmModal({ alarm, onClose, onAck, onClear, rtmpStatUrl }) {
                 <div>
                   <div className="text-xs text-gray-600 mb-1">RTMP (VLC):</div>
                   <div className="text-xs text-green-300 font-mono break-all">
-                    rtmp://49.37.110.161:1935/live/bts01
+                    rtmp://74.225.144.11:1935/live/bts01
                   </div>
                 </div>
               </div>

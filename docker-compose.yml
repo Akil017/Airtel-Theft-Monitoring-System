@@ -61,6 +61,8 @@ services:
     env_file: .env
     environment:
       ALARM_MANAGER_URL: http://alarm-manager:8002
+      MIN_CONFIDENCE: "0.75"
+      CONSECUTIVE_FRAMES_REQUIRED: "5"
     ports:
       - "8001:8001"
     depends_on:
