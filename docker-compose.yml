@@ -5,7 +5,7 @@ services:
   # ── RTMP Server ─────────────────────────────────────────────────────────────
   # Receives live stream pushed from CP Plus EZ-S35T camera
   # Camera RTMP URL to set in EzyLiv+ app:
-  #   rtmp://49.37.110.161:1935/live/bts01
+  #   rtmp://74.225.144.11:1935/live/bts01
   rtmp-server:
     build: ./rtmp-server
     container_name: airtel-rtmp
@@ -93,8 +93,8 @@ services:
     restart: unless-stopped
     env_file: .env
     environment:
-      NEXT_PUBLIC_ALARM_MANAGER_WS:  ws://49.37.110.161:8002/ws
-      NEXT_PUBLIC_ALARM_MANAGER_URL: http://49.37.110.161:8002
+      NEXT_PUBLIC_ALARM_MANAGER_WS:  ws://74.225.144.11:8002/ws
+      NEXT_PUBLIC_ALARM_MANAGER_URL: http://74.225.144.11:8002
     ports:
       - "3000:3000"
     depends_on:
