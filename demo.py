@@ -737,7 +737,6 @@ def main():
         t   = now                       # time reference for animations
         fps = 0.9 * fps + 0.1 * (1.0 / max(now - prev_time, 1e-6))
         prev_time = now
-
         # ── Inference ─────────────────────────────────────────────────────────
         results    = model(frame, verbose=False,
                            classes=[0,15,16,17,18,19,20,21,22,23],
@@ -837,3 +836,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+    #iwalkalonelyroad
+    

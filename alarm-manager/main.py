@@ -15,7 +15,10 @@ import asyncio, logging, httpx
 from datetime import datetime, timezone
 from typing import List, Optional
 from contextlib import asynccontextmanager
+from snapshot_router import router as snapshot_router
+from whatsapp_service import router as whatsapp_router, init_contacts_table
 
+import asyncio
 import asyncpg
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
@@ -57,12 +60,11 @@ CREATE TABLE IF NOT EXISTS alarms (
 
 class WSManager:
     def __init__(self):
-        self._clients: List[WebSocket] = []
+        self._clients = []
 
     async def connect(self, ws: WebSocket):
         await ws.accept()
         self._clients.append(ws)
-        log.info(f"WS connected. Total: {len(self._clients)}")
 
     def disconnect(self, ws: WebSocket):
         if ws in self._clients:
@@ -75,6 +77,7 @@ class WSManager:
                 await ws.send_json(payload)
             except Exception:
                 dead.append(ws)
+
         for ws in dead:
             self._clients.remove(ws)
 
@@ -83,6 +86,24 @@ class WSManager:
         return len(self._clients)
 
 
+async def _send_whatsapp(alarm):
+    payload = {
+        "alarm_id": alarm.alarm_id,
+        "site_id": alarm.site_id,
+        "camera_id": alarm.camera_id,
+        "severity": alarm.severity,
+        "threat_level": alarm.threat_level or "INTRUSION DETECTED",
+        "person_count": alarm.person_count or 0,
+        "confidence": alarm.confidence or 0.0,
+        "snapshot_url": None,
+        "timestamp": alarm.first_detected.isoformat() + "Z",
+    }
+
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        await client.post(
+            "http://localhost:8002/alerts/whatsapp/send",
+            json=payload
+        )
 ws_manager = WSManager()
 db_pool: asyncpg.Pool = None
 
@@ -110,6 +131,8 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="Alarm Manager", version="2.0.0", lifespan=lifespan)
+app.include_router(snapshot_router)
+app.include_router(whatsapp_router)
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
 
@@ -213,8 +236,8 @@ async def create_alarm(alarm: SecurityAlarm):
     payload = {**alarm.model_dump(mode="json"), "enode_alarm_id": enode_id}
     await ws_manager.broadcast({"event": "ALARM_CREATED", "alarm": payload})
     log.info(f"Alarm created: {alarm.alarm_id} | {sev} | {alarm.threat_level}")
+    asyncio.create_task(_send_whatsapp(alarm))
     return payload
-
 @app.get("/alarms")
 async def list_alarms(status: Optional[str] = None, limit: int = 100):
     async with db_pool.acquire() as conn:
@@ -283,6 +306,10 @@ async def clear_alarm(req: AlarmClearRequest):
                                  "operator": req.operator_id,
                                  "reason": req.reason})
     return {"status": "cleared", "alarm_id": req.alarm_id}
+
+@app.on_event("startup")
+async def startup():
+    await init_contacts_table()   
 
 @app.websocket("/ws")
 async def websocket_endpoint(ws: WebSocket):

@@ -2,17 +2,14 @@ version: "3.9"
 
 services:
 
-  # ── RTMP Server ─────────────────────────────────────────────────────────────
-  # Receives live stream pushed from CP Plus EZ-S35T camera
-  # Camera RTMP URL to set in EzyLiv+ app:
-  #   rtmp://74.225.144.11:1935/live/bts01
+  # ── RTMP Server ──────────────────────────────────────────────────────────────
   rtmp-server:
     build: ./rtmp-server
     container_name: airtel-rtmp
     restart: unless-stopped
     ports:
-      - "1935:1935"    # RTMP ingest — camera pushes here
-      - "8080:8080"    # HLS preview — watch stream in browser
+      - "1935:1935"    # RTMP ingest
+      - "8080:8080"    # HLS preview
     volumes:
       - /tmp/hls:/tmp/hls
 
@@ -36,8 +33,6 @@ services:
       retries:  5
 
   # ── Detection Service ────────────────────────────────────────────────────────
-  # Reads from RTMP server, runs YOLOv8s, posts events to event-processor
-  # Also controls CP Plus hooter via Tuya/HTTP API
   detection-service:
     build: ./detection-service
     container_name: airtel-detector
@@ -45,13 +40,14 @@ services:
     env_file: .env
     environment:
       EVENT_PROCESSOR_URL: http://event-processor:8001
-      # Reads RTMP stream from rtmp-server container
-      RTSP_URL: rtmp://rtmp-server:1935/live/bts01
+      ALARM_MANAGER_URL:   http://alarm-manager:8002
+      RTSP_URL:            rtmp://rtmp-server:1935/live/bts01
     depends_on:
       - event-processor
       - rtmp-server
     volumes:
       - ./detection-service:/app
+      - snapshots_data:/shared/snapshots   # ← write snapshots here
 
   # ── Event Processor ──────────────────────────────────────────────────────────
   event-processor:
@@ -60,9 +56,9 @@ services:
     restart: unless-stopped
     env_file: .env
     environment:
-      ALARM_MANAGER_URL: http://alarm-manager:8002
-      MIN_CONFIDENCE: "0.75"
-      CONSECUTIVE_FRAMES_REQUIRED: "5"
+      ALARM_MANAGER_URL:            http://alarm-manager:8002
+      MIN_CONFIDENCE:               "0.75"
+      CONSECUTIVE_FRAMES_REQUIRED:  "3"
     ports:
       - "8001:8001"
     depends_on:
@@ -78,7 +74,8 @@ services:
     restart: unless-stopped
     env_file: .env
     environment:
-      DATABASE_URL: postgresql+asyncpg://airtel:airtel@postgres:5432/airtel_monitor
+      DATABASE_URL:        postgresql+asyncpg://airtel:airtel@postgres:5432/airtel_monitor
+      SNAPSHOT_DIR:        /shared/snapshots
     ports:
       - "8002:8002"
     depends_on:
@@ -87,6 +84,7 @@ services:
     volumes:
       - ./alarm-manager:/app
       - ./shared:/shared
+      - snapshots_data:/shared/snapshots   # ← serve snapshots from here
 
   # ── NOC Dashboard ─────────────────────────────────────────────────────────────
   dashboard:
@@ -115,3 +113,4 @@ services:
 
 volumes:
   postgres_data:
+  snapshots_data:    # ← named volume shared between detector and alarm-manager
