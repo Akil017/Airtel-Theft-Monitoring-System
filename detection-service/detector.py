@@ -27,7 +27,7 @@ ANIMAL_CLASSES = {
     15:"Cat", 16:"Dog",      17:"Horse",  18:"Sheep",
     19:"Cow", 20:"Elephant", 21:"Bear",   22:"Zebra", 23:"Giraffe"
 }
-DETECT_CLASSES = [int(c) for c in settings.DETECT_CLASSES.split(",")]
+DETECT_CLASSES = [0, 15, 16, 17, 18, 19, 20, 21, 22, 23]  # person + animals
 
 
 # ── CP Plus Hooter Controller ─────────────────────────────────────────────────
@@ -223,13 +223,60 @@ class DetectionService:
             for box in results.boxes:
                 conf  = float(box.conf[0])
                 cls   = int(box.cls[0])
+
+                if conf < settings.CONFIDENCE_THRESHOLD:
+                    continue
+
                 label = "Person" if cls == 0 else ANIMAL_CLASSES.get(cls, "Animal")
-                now   = time.time()
+
+                # Filter tiny boxes
+                x1, y1, x2, y2 = [int(v) for v in box.xyxy[0]]
+                box_area = (x2 - x1) * (y2 - y1)
+                frame_h, frame_w = frame.shape[:2]
+                frame_area = frame_h * frame_w
+                min_area = frame_area * 0.01
+
+                if box_area < min_area:
+                    log.debug(f"Tiny box skipped [{label}] area={box_area}")
+                    continue
+
+                if label != "Person":
+                    # Log animal but DO NOT send alarm event
+                    log.info(f"ANIMAL detected [{label}] conf={conf:.2f} — logged only, no alarm")
+                    continue
+
+                # Person detected — apply throttle and send alarm event
+                now = time.time()
                 if now - self.last_event_time < settings.EVENT_THROTTLE_SECONDS:
                     continue
                 self.last_event_time = now
-                x1, y1, x2, y2 = [int(v) for v in box.xyxy[0]]
-                await self.post_event(self.build_event(conf, label, [x1, y1, x2, y2]))
+
+                log.info(f"PERSON detected conf={conf:.2f} box={box_area}px — sending alarm event")
+                # Count total persons in this frame
+                total_persons = sum(
+                    1 for b in results.boxes
+                    if int(b.cls[0]) == 0 and float(b.conf[0]) >= settings.CONFIDENCE_THRESHOLD
+                )
+                # Save 3 snapshots
+                import os
+                from datetime import datetime as _dt
+                snap_dir = "/app/snapshots"
+                os.makedirs(snap_dir, exist_ok=True)
+                ts = _dt.now().strftime("%Y%m%d_%H%M%S")
+                snaps = []
+                for s_idx in range(3):
+                    snap_path = f"{snap_dir}/snap_{ts}_{s_idx}.jpg"
+                    import cv2 as _cv2
+                    _cv2.imwrite(snap_path, frame)
+                    snaps.append(snap_path)
+                    log.info(f"Snapshot saved: {snap_path}")
+
+                event = self.build_event(conf, label, [x1, y1, x2, y2])
+                event["person_count"] = total_persons
+                event["snapshots"] = snaps
+                event["snapshot_path"] = snaps[0] if snaps else ""
+                await self.post_event(event)
+                break  # Send one event per frame with total count
 
         cap.release()
 

@@ -306,10 +306,36 @@ async def clear_alarm(req: AlarmClearRequest):
                                  "operator": req.operator_id,
                                  "reason": req.reason})
     return {"status": "cleared", "alarm_id": req.alarm_id}
-
 @app.on_event("startup")
 async def startup():
     await init_contacts_table()   
+@app.get("/snapshots/{filename}")
+async def get_snapshot(filename: str):
+    """Serve snapshot images."""
+    from fastapi.responses import FileResponse
+    import os
+    path = f"/app/snapshots/{filename}"
+    if os.path.exists(path):
+        return FileResponse(path)
+    raise HTTPException(404, "Snapshot not found")
+
+
+@app.get("/alarms/{alarm_id}/snapshots")
+async def get_alarm_snapshots(alarm_id: str):
+    """Get all snapshots for an alarm."""
+    import os, glob
+    snap_dir = "/app/snapshots"
+    # Find snapshots that match alarm time
+    async with db_pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT first_detected FROM alarms WHERE alarm_id=$1", alarm_id
+        )
+    if not row:
+        return []
+    ts = row["first_detected"].strftime("%Y%m%d_%H%M")
+    snaps = glob.glob(f"{snap_dir}/snap_{ts}*.jpg")
+    return [f"/snapshots/{os.path.basename(s)}" for s in sorted(snaps)]
+
 
 @app.websocket("/ws")
 async def websocket_endpoint(ws: WebSocket):
