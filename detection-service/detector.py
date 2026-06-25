@@ -11,6 +11,7 @@ CP Plus Hooter Logic:
   - NOC clears alarm -> alarm-manager calls POST /hooter/stop -> hooter OFF immediately
 """
 import cv2, time, logging, httpx, asyncio, threading
+from snapshot_manager import FrameBuffer, save_snapshots
 from ultralytics import YOLO
 from datetime import datetime, timezone
 from config import settings
@@ -152,6 +153,7 @@ class DetectionService:
         self.model           = YOLO(settings.MODEL_PATH)
         self.frame_count     = 0
         self.last_event_time = 0
+        self.frame_buffer    = FrameBuffer(size=6)
 
     def open_stream(self):
         source = settings.RTSP_URL if settings.RTSP_URL else 0
@@ -192,6 +194,9 @@ class DetectionService:
             )
             # Hooter fires for humans only
             if event["label"] == "Person":
+                frames = self.frame_buffer.get_frames()
+                snaps = save_snapshots(frames, event["camera_id"], event.get("timestamp","unknown"))
+                if snaps: event["snapshots"] = snaps
                 await hooter.trigger()
             else:
                 log.info(f"Animal ({event['label']}) -> logged only, no hooter")
