@@ -1,510 +1,219 @@
 "use client";
 import { useEffect, useState, useCallback, useRef } from "react";
 
-const ALARM_MANAGER_URL = process.env.NEXT_PUBLIC_ALARM_MANAGER_URL || "http://74.225.144.11:8002";
-const ALARM_MANAGER_WS  = process.env.NEXT_PUBLIC_ALARM_MANAGER_WS  || "ws://74.225.144.11:8002/ws";
-const RTMP_SERVER_URL   = "http://74.225.144.11:8080";
-const HLS_URL           = `${RTMP_SERVER_URL}/hls/bts01.m3u8`;
-const PLAYER_URL        = `${RTMP_SERVER_URL}/player.html`;
+const ALARM_URL  = process.env.NEXT_PUBLIC_ALARM_MANAGER_URL || "http://74.225.144.11:8002";
+const ALARM_WS   = process.env.NEXT_PUBLIC_ALARM_MANAGER_WS  || "ws://74.225.144.11:8002/ws";
+const RTMP_BASE  = "http://74.225.144.11:8080";
+const PLAYER_URL = `${RTMP_BASE}/player.html`;
+const HLS_URL    = `${RTMP_BASE}/hls/bts01.m3u8`;
 
-// ── Severity / status style maps ──────────────────────────────────────────────
-const SEVERITY = {
-  CRITICAL: { bg:"bg-red-950",    border:"border-red-500",    badge:"bg-red-500 text-white",       dot:"bg-red-500",    glow:"shadow-red-500/30"    },
-  HIGH:     { bg:"bg-orange-950", border:"border-orange-500", badge:"bg-orange-500 text-white",    dot:"bg-orange-400", glow:"shadow-orange-500/20" },
-  "MID-HIGH":{ bg:"bg-orange-950",border:"border-orange-400", badge:"bg-orange-400 text-white",   dot:"bg-orange-300", glow:""                     },
-  MEDIUM:   { bg:"bg-yellow-950", border:"border-yellow-500", badge:"bg-yellow-500 text-black",   dot:"bg-yellow-400", glow:""                     },
-  LOW:      { bg:"bg-blue-950",   border:"border-blue-500",   badge:"bg-blue-500 text-white",     dot:"bg-blue-400",   glow:""                     },
+const SEV = {
+  CRITICAL:{ badge:"bg-red-600 text-white",   dot:"bg-red-500",    border:"border-red-500",   bg:"bg-red-950/30" },
+  HIGH:    { badge:"bg-orange-500 text-white", dot:"bg-orange-400", border:"border-orange-500",bg:"bg-orange-950/20"},
+  MEDIUM:  { badge:"bg-yellow-500 text-black", dot:"bg-yellow-400", border:"border-yellow-400",bg:"bg-yellow-950/10"},
+  LOW:     { badge:"bg-blue-600 text-white",   dot:"bg-blue-400",   border:"border-blue-500",  bg:"" },
 };
-const STATUS = {
-  ACTIVE:       "bg-red-500/20 text-red-400 border border-red-500/40",
-  ACKNOWLEDGED: "bg-yellow-500/20 text-yellow-400 border border-yellow-500/40",
-  CLEARED:      "bg-green-500/20 text-green-400 border border-green-500/40",
+const STAT = {
+  ACTIVE:      "bg-red-500/15 text-red-400 border-red-500/30",
+  ACKNOWLEDGED:"bg-yellow-500/15 text-yellow-400 border-yellow-500/30",
+  CLEARED:     "bg-green-500/15 text-green-400 border-green-500/30",
 };
 
-function fmtTime(ts) { if (!ts) return "—"; return new Date(ts).toLocaleTimeString("en-IN", {hour:"2-digit",minute:"2-digit",second:"2-digit"}); }
-function fmtDate(ts) { if (!ts) return "—"; return new Date(ts).toLocaleDateString("en-IN", {day:"2-digit",month:"short",year:"numeric"}); }
-function fmtDuration(ts) {
+const fmtTime = ts => ts ? new Date(ts).toLocaleTimeString("en-IN",{hour:"2-digit",minute:"2-digit",second:"2-digit",hour12:false}) : "—";
+const fmtDate = ts => ts ? new Date(ts).toLocaleDateString("en-IN",{day:"2-digit",month:"short",year:"numeric"}) : "—";
+const fmtDateFull = ts => ts ? `${fmtDate(ts)} ${fmtTime(ts)}` : "—";
+const fmtAgo  = ts => {
   if (!ts) return "";
-  const s = Math.floor((Date.now() - new Date(ts)) / 1000);
-  if (s < 60) return `${s}s ago`;
-  if (s < 3600) return `${Math.floor(s/60)}m ago`;
-  return `${Math.floor(s/3600)}h ago`;
-}
+  const s = Math.floor((Date.now()-new Date(ts))/1000);
+  if (s<60)   return `${s}s ago`;
+  if (s<3600) return `${Math.floor(s/60)}m ${s%60}s ago`;
+  return `${Math.floor(s/3600)}h ${Math.floor((s%3600)/60)}m ago`;
+};
+const fmtConf = v => v ? `${(v*100).toFixed(1)}%` : "—";
 
-// ── Alarm sound (Web Audio API — no external file needed) ─────────────────────
-function playAlarmSound(severity = "HIGH") {
+function playAlarm(sev="HIGH") {
   try {
-    const ctx = new (window.AudioContext || window.webkitAudioContext)();
-
-    const patterns = {
-      CRITICAL: [
-        { freq:1800, dur:0.12 }, { freq:0, dur:0.05 },
-        { freq:1800, dur:0.12 }, { freq:0, dur:0.05 },
-        { freq:2200, dur:0.25 }, { freq:0, dur:0.10 },
-        { freq:1800, dur:0.12 }, { freq:0, dur:0.05 },
-        { freq:1800, dur:0.12 }, { freq:0, dur:0.05 },
-        { freq:2200, dur:0.40 },
-      ],
-      HIGH: [
-        { freq:1100, dur:0.20 }, { freq:0, dur:0.08 },
-        { freq:1300, dur:0.20 }, { freq:0, dur:0.08 },
-        { freq:1100, dur:0.30 },
-      ],
+    const ctx = new (window.AudioContext||window.webkitAudioContext)();
+    const seqs = {
+      CRITICAL:[[1800,.08],[0,.04],[1800,.08],[0,.04],[1800,.08],[0,.04],[2200,.5]],
+      HIGH:    [[1100,.2],[0,.06],[1300,.2],[0,.06],[1100,.3]],
     };
-
-    const seq = patterns[severity] || patterns.HIGH;
-    let time  = ctx.currentTime;
-
-    seq.forEach(({ freq, dur }) => {
-      if (freq > 0) {
-        const osc  = ctx.createOscillator();
-        const gain = ctx.createGain();
-        osc.connect(gain);
-        gain.connect(ctx.destination);
-        osc.type      = severity === "CRITICAL" ? "sawtooth" : "square";
-        osc.frequency.setValueAtTime(freq, time);
-        gain.gain.setValueAtTime(0.35, time);
-        gain.gain.exponentialRampToValueAtTime(0.001, time + dur);
-        osc.start(time);
-        osc.stop(time + dur);
-      }
-      time += dur;
+    let t = ctx.currentTime;
+    (seqs[sev]||seqs.HIGH).forEach(([f,d])=>{
+      if(f>0){const o=ctx.createOscillator(),g=ctx.createGain();o.type="square";o.frequency.value=f;g.gain.setValueAtTime(.15,t);g.gain.exponentialRampToValueAtTime(.001,t+d);o.connect(g);g.connect(ctx.destination);o.start(t);o.stop(t+d);}
+      t+=d;
     });
-  } catch (e) {
-    // AudioContext blocked — silently skip
-    console.warn("Alarm sound blocked:", e.message);
-  }
+  } catch{}
 }
 
-// ── Pulsing dot ───────────────────────────────────────────────────────────────
-function PulseDot({ color = "bg-red-500" }) {
-  return (
-    <span className="relative flex h-2.5 w-2.5">
-      <span className={`animate-ping absolute inline-flex h-full w-full rounded-full ${color} opacity-60`} />
-      <span className={`relative inline-flex rounded-full h-2.5 w-2.5 ${color}`} />
-    </span>
-  );
+function Dot({color="bg-red-500",size="h-2.5 w-2.5",pulse=true}){
+  return <span className={`relative flex ${size}`}>{pulse&&<span className={`animate-ping absolute inline-flex h-full w-full rounded-full ${color} opacity-60`}/>}<span className={`relative inline-flex rounded-full ${size} ${color}`}/></span>;
 }
 
-// ── Live stream panel ──────────────────────────────────────────────────────────
-function LiveStreamPanel({ compact = false }) {
-  const [streamStatus, setStreamStatus] = useState("checking");
-  const iframeRef = useRef(null);
+function Badge({children,className=""}){return <span className={`inline-flex items-center px-2 py-0.5 rounded text-xs font-mono font-bold border ${className}`}>{children}</span>;}
 
-  useEffect(() => {
-    const check = async () => {
-      try {
-        const r = await fetch(`${RTMP_SERVER_URL}/health`, { signal: AbortSignal.timeout(3000) });
-        setStreamStatus(r.ok ? "online" : "offline");
-      } catch { setStreamStatus("offline"); }
-    };
-    check();
-    const t = setInterval(check, 10000);
-    return () => clearInterval(t);
-  }, []);
+// ── Live Stream ──────────────────────────────────────────────────────────────
+function LiveStream({compact=false}){
+  const [live,setLive]=useState(false);
+  useEffect(()=>{
+    const check=async()=>{try{const r=await fetch(`${RTMP_BASE}/health`,{signal:AbortSignal.timeout(3000)});setLive(r.ok);}catch{setLive(false);}};
+    check();const t=setInterval(check,8000);return()=>clearInterval(t);
+  },[]);
 
-  const content = streamStatus === "online"
-    ? <iframe ref={iframeRef} src={PLAYER_URL} className="w-full h-full border-0" title="Live Feed" allowFullScreen />
-    : (
-      <div className="flex flex-col items-center justify-center h-full gap-3 text-gray-500">
-        <svg className="w-10 h-10 opacity-30" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M15 10l4.553-2.276A1 1 0 0121 8.723v6.554a1 1 0 01-1.447.894L15 14M3 8a2 2 0 012-2h8a2 2 0 012 2v8a2 2 0 01-2 2H5a2 2 0 01-2-2V8z" />
-        </svg>
-        <span className="text-xs font-mono">STREAM OFFLINE</span>
-        <span className="text-xs text-gray-600">Enable RTMP in EzyLiv+ app</span>
-      </div>
-    );
-
-  if (compact) return (
-    <div className="relative w-full aspect-video bg-gray-950 rounded-lg overflow-hidden border border-gray-700">
-      {content}
-      <div className={`absolute top-2 right-2 flex items-center gap-1.5 px-2 py-1 rounded-full text-xs font-mono ${streamStatus === "online" ? "bg-green-500/20 text-green-400 border border-green-500/30" : "bg-gray-800 text-gray-500 border border-gray-700"}`}>
-        <PulseDot color={streamStatus === "online" ? "bg-green-500" : "bg-gray-500"} />
-        {streamStatus === "online" ? "LIVE" : "OFFLINE"}
+  if(compact) return(
+    <div className="relative w-full aspect-video bg-gray-950 rounded-lg overflow-hidden border border-gray-800">
+      {live?<iframe src={PLAYER_URL} className="w-full h-full border-0" title="Live" allowFullScreen/>:
+        <div className="flex flex-col items-center justify-center h-full gap-2 text-gray-600">
+          <svg className="w-8 h-8 opacity-30" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M15 10l4.553-2.276A1 1 0 0121 8.723v6.554a1 1 0 01-1.447.894L15 14M3 8a2 2 0 012-2h8a2 2 0 012 2v8a2 2 0 01-2 2H5a2 2 0 01-2-2V8z"/></svg>
+          <span className="text-xs font-mono">OFFLINE — Toggle RTMP in EzyLiv+</span>
+        </div>}
+      <div className={`absolute top-2 right-2 flex items-center gap-1.5 px-2 py-1 rounded-full text-xs font-mono border ${live?"bg-green-500/15 text-green-400 border-green-500/30":"bg-gray-800 text-gray-500 border-gray-700"}`}>
+        <Dot color={live?"bg-green-500":"bg-gray-500"} size="h-2 w-2"/>{live?"LIVE":"OFFLINE"}
       </div>
     </div>
   );
 
-  return (
+  return(
     <div className="bg-gray-900 border border-gray-800 rounded-xl overflow-hidden">
-      <div className="flex items-center justify-between px-4 py-3 border-b border-gray-800">
-        <span className="text-sm font-semibold text-white font-mono tracking-wide">CAM-BTS-01 — LIVE FEED</span>
-        <div className={`flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-mono border ${streamStatus === "online" ? "bg-green-500/10 text-green-400 border-green-500/30" : "bg-gray-800 text-gray-500 border-gray-700"}`}>
-          <PulseDot color={streamStatus === "online" ? "bg-green-500" : "bg-gray-500"} />
-          {streamStatus === "online" ? "STREAMING" : "OFFLINE"}
+      <div className="flex items-center justify-between px-4 py-2.5 border-b border-gray-800 bg-gray-950">
+        <div className="flex items-center gap-2"><Dot color="bg-red-500" size="h-2 w-2"/><span className="text-xs font-mono text-white tracking-wide">CAM-BTS-01 · LIVE FEED</span></div>
+        <div className="flex items-center gap-3">
+          <span className="text-xs font-mono text-gray-600">800×448 · H.264 · 15fps · 4G</span>
+          <Badge className={live?"bg-green-500/10 text-green-400 border-green-500/30":"bg-gray-800 text-gray-500 border-gray-700"}>{live?"● STREAMING":"○ OFFLINE"}</Badge>
+          <a href={PLAYER_URL} target="_blank" rel="noreferrer" className="text-xs font-mono text-gray-600 hover:text-white transition-colors">FULLSCREEN ↗</a>
         </div>
       </div>
-      <div className="relative aspect-video bg-black">{content}</div>
-      <div className="flex items-center justify-between px-4 py-2 bg-gray-950 border-t border-gray-800">
-        <span className="text-xs font-mono text-gray-600">AIRTEL-ASM-BTS-001</span>
-        <a href={PLAYER_URL} target="_blank" rel="noreferrer" className="text-xs font-mono text-gray-600 hover:text-blue-400 transition-colors">OPEN ↗</a>
+      <div className="relative aspect-video bg-black">
+        {live?<iframe src={PLAYER_URL} className="w-full h-full border-0" title="Live" allowFullScreen/>:
+          <div className="flex flex-col items-center justify-center h-full gap-4 text-gray-600">
+            <div className="w-16 h-16 rounded-full bg-gray-800 flex items-center justify-center">
+              <svg className="w-8 h-8 opacity-40" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M15 10l4.553-2.276A1 1 0 0121 8.723v6.554a1 1 0 01-1.447.894L15 14M3 8a2 2 0 012-2h8a2 2 0 012 2v8a2 2 0 01-2 2H5a2 2 0 01-2-2V8z"/></svg>
+            </div>
+            <div className="text-center space-y-1">
+              <p className="text-sm font-mono text-gray-500">STREAM OFFLINE</p>
+              <p className="text-xs font-mono text-gray-700">EzyLiv+ → Settings → Advanced → RTMP → Enable</p>
+              <p className="text-xs font-mono text-gray-800 select-all">rtmp://74.225.144.11:1935/live/bts01</p>
+            </div>
+          </div>}
+      </div>
+      <div className="flex items-center justify-between px-4 py-2 bg-gray-950 border-t border-gray-800 text-xs font-mono">
+        <span className="text-gray-700">AIRTEL-ASM-BTS-001 · Central India · Azure VM</span>
+        <div className="flex gap-3">
+          <a href={HLS_URL} target="_blank" rel="noreferrer" className="text-gray-600 hover:text-blue-400 transition-colors">HLS ↗</a>
+          <span className="text-gray-800">|</span>
+          <span className="text-gray-600 select-all">rtmp://74.225.144.11:1935/live/bts01</span>
+        </div>
       </div>
     </div>
   );
 }
 
-// ── Snapshot gallery — fetches REAL snapshots from alarm-manager ──────────────
-function SnapshotGallery({ alarm }) {
-  const [snapshots, setSnapshots] = useState(null);
-  const [loading,   setLoading  ] = useState(true);
-  const [selected,  setSelected ] = useState(null);
-
-  useEffect(() => {
-    if (!alarm?.alarm_id && !alarm?.id) return;
-    const id = alarm.alarm_id || `ALM-${alarm.id?.slice(0,8).toUpperCase()}`;
-
-    setLoading(true);
-    fetch(`${ALARM_MANAGER_URL}/snapshots/alarm/${encodeURIComponent(id)}`)
-      .then(r => r.ok ? r.json() : null)
-      .then(data => {
-        setSnapshots(data?.snapshots || []);
-        setLoading(false);
-      })
-      .catch(() => { setSnapshots([]); setLoading(false); });
-  }, [alarm?.alarm_id, alarm?.id]);
-
-  if (loading) return (
-    <div className="space-y-2">
-      <p className="text-xs font-mono text-gray-500 uppercase tracking-wider">Detection Snapshots</p>
-      <div className="grid grid-cols-3 gap-2">
-        {[0,1,2].map(i => (
-          <div key={i} className="aspect-video bg-gray-900 rounded-lg border border-gray-800 animate-pulse" />
-        ))}
+// ── Snapshots ────────────────────────────────────────────────────────────────
+function Snapshots({alarm}){
+  const snaps = alarm.snapshots||[];
+  if(!snaps.length) return(
+    <div className="flex flex-col items-center justify-center py-16 gap-4 text-gray-600">
+      <div className="w-16 h-16 rounded-full bg-gray-800 flex items-center justify-center">
+        <svg className="w-8 h-8 opacity-30" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M3 9a2 2 0 012-2h.93a2 2 0 001.664-.89l.812-1.22A2 2 0 0110.07 4h3.86a2 2 0 011.664.89l.812 1.22A2 2 0 0018.07 7H19a2 2 0 012 2v9a2 2 0 01-2 2H5a2 2 0 01-2-2V9z"/><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M15 13a3 3 0 11-6 0 3 3 0 016 0z"/></svg>
+      </div>
+      <div className="text-center">
+        <p className="text-sm font-mono text-gray-500">No snapshot available for this alarm</p>
+        <p className="text-xs font-mono text-gray-700 mt-1">Snapshots are saved when YOLO detects an intrusion via camera stream</p>
       </div>
     </div>
   );
-
-  if (!snapshots || snapshots.length === 0) return (
-    <div className="space-y-2">
-      <p className="text-xs font-mono text-gray-500 uppercase tracking-wider">Detection Snapshots</p>
-      <div className="flex flex-col items-center justify-center py-10 gap-3 bg-gray-950 rounded-lg border border-gray-800">
-        <svg className="w-8 h-8 text-gray-700" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M3 9a2 2 0 012-2h.93a2 2 0 001.664-.89l.812-1.22A2 2 0 0110.07 4h3.86a2 2 0 011.664.89l.812 1.22A2 2 0 0018.07 7H19a2 2 0 012 2v9a2 2 0 01-2 2H5a2 2 0 01-2-2V9z" />
-        </svg>
-        <p className="text-xs font-mono text-gray-600">No snapshots yet</p>
-        <p className="text-xs text-gray-700 font-mono">Auto-captured when YOLO detects a person</p>
-      </div>
-    </div>
-  );
-
-  return (
-    <div className="space-y-2">
+  return(
+    <div className="p-4 space-y-3">
       <div className="flex items-center justify-between">
-        <p className="text-xs font-mono text-gray-500 uppercase tracking-wider">Detection Snapshots ({snapshots.length})</p>
-        <span className="text-xs font-mono text-green-400">● Auto-captured at detection</span>
+        <p className="text-xs font-mono text-gray-500 uppercase tracking-wider">{snaps.length} Frame{snaps.length>1?"s":""} Captured at Detection</p>
+        <p className="text-xs font-mono text-gray-600">{fmtDateFull(alarm.created_at)}</p>
       </div>
-      <div className="grid grid-cols-3 gap-2">
-        {snapshots.map((snap, i) => (
-          <div
-            key={snap.filename}
-            onClick={() => setSelected(snap)}
-            className="relative aspect-video bg-gray-950 rounded-lg border border-gray-800 overflow-hidden cursor-pointer hover:border-blue-500 transition-colors group"
-          >
-            <img
-              src={`${ALARM_MANAGER_URL}${snap.url}`}
-              alt={`Snapshot ${i + 1}`}
-              className="w-full h-full object-cover"
-              onError={e => { e.target.style.display = "none"; }}
-            />
-            <div className="absolute inset-0 bg-gradient-to-t from-black/80 to-transparent opacity-0 group-hover:opacity-100 transition-opacity flex items-end p-2">
-              <span className="text-xs font-mono text-white">🔍 Enlarge</span>
+      <div className={`grid gap-3 ${snaps.length===1?"grid-cols-1":snaps.length===2?"grid-cols-2":"grid-cols-3"}`}>
+        {snaps.map((snap,i)=>(
+          <div key={i} className="relative rounded-lg overflow-hidden border border-gray-700 group bg-gray-950">
+            <img src={`${ALARM_URL}/snapshots/${snap.split("/").pop()}`} alt={`Frame ${i+1}`}
+              className="w-full aspect-video object-cover" onError={e=>{e.target.parentElement.style.display="none";}}/>
+            <div className="absolute bottom-0 left-0 right-0 bg-gradient-to-t from-black/80 to-transparent px-2 py-2">
+              <span className="text-xs font-mono text-gray-300">Frame {i+1} of {snaps.length}</span>
             </div>
-            <div className="absolute top-1 left-1 bg-black/70 rounded px-1.5 py-0.5">
-              <span className="text-xs font-mono text-yellow-400">{snap.offset || `+${i*2}s`}</span>
-            </div>
-            <div className="absolute bottom-1 right-1 bg-black/70 rounded px-1 py-0.5">
-              <span className="text-xs font-mono text-gray-400">{fmtTime(snap.taken_at)}</span>
-            </div>
+            <a href={`${ALARM_URL}/snapshots/${snap.split("/").pop()}`} target="_blank" rel="noreferrer"
+              className="absolute top-2 right-2 opacity-0 group-hover:opacity-100 transition-opacity bg-black/70 rounded px-2 py-1 text-xs font-mono text-white">↗</a>
           </div>
         ))}
       </div>
-      <p className="text-xs text-gray-700 font-mono">Stored in /shared/snapshots · Click to enlarge</p>
-
-      {/* Lightbox */}
-      {selected && (
-        <div className="fixed inset-0 z-[100] bg-black/90 flex items-center justify-center p-4" onClick={() => setSelected(null)}>
-          <div className="relative max-w-4xl w-full" onClick={e => e.stopPropagation()}>
-            <img src={`${ALARM_MANAGER_URL}${selected.url}`} alt="Snapshot" className="w-full rounded-xl border border-gray-700" />
-            <div className="flex items-center justify-between mt-2 px-1">
-              <span className="text-xs font-mono text-gray-400">{selected.filename}</span>
-              <div className="flex gap-3">
-                <a href={`${ALARM_MANAGER_URL}${selected.url}`} download className="text-xs font-mono text-blue-400 hover:text-blue-300">Download ↓</a>
-                <button onClick={() => setSelected(null)} className="text-xs font-mono text-gray-500 hover:text-white">Close ✕</button>
-              </div>
-            </div>
-          </div>
-        </div>
-      )}
+      <p className="text-xs font-mono text-gray-700">Auto-captured by YOLO detection service · Stored on server</p>
     </div>
   );
 }
 
-// ── Performance metrics card ───────────────────────────────────────────────────
-function PerfMetrics({ alarms }) {
-  const active    = alarms.filter(a => a.status === "ACTIVE").length;
-  const cleared   = alarms.filter(a => a.status === "CLEARED").length;
-  const critical  = alarms.filter(a => a.severity === "CRITICAL").length;
-  const total     = alarms.length;
-  const ackRate   = total > 0 ? Math.round((alarms.filter(a => a.status !== "ACTIVE").length / total) * 100) : 100;
+// ── Settings Panel ───────────────────────────────────────────────────────────
+function SettingsPanel({onClose}){
+  const [nums,setNums]=useState(()=>{try{return JSON.parse(localStorage.getItem("wa_recipients")||"[]");}catch{return [];}});
+  const [phone,setPhone]=useState(""); const [key,setKey]=useState(""); const [name,setName]=useState("");
+  const [testing,setTesting]=useState({});
 
-  // MTTA: mean time to acknowledge (seconds)
-  const acknowledged = alarms.filter(a => a.acknowledged_at && a.created_at);
-  const mtta = acknowledged.length > 0
-    ? Math.round(acknowledged.reduce((sum, a) => sum + (new Date(a.acknowledged_at) - new Date(a.created_at)) / 1000, 0) / acknowledged.length)
-    : null;
+  const save=u=>{setNums(u);localStorage.setItem("wa_recipients",JSON.stringify(u));
+    fetch(`${ALARM_URL}/settings/whatsapp`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({recipients:u})}).catch(()=>{});};
+  const add=()=>{if(!phone.trim()||!key.trim())return;save([...nums,{phone:phone.trim(),apikey:key.trim(),name:name.trim()}]);setPhone("");setKey("");setName("");};
+  const remove=i=>save(nums.filter((_,idx)=>idx!==i));
+  const test=async(r,i)=>{
+    setTesting(s=>({...s,[i]:"sending"}));
+    try{const msg=encodeURIComponent(`🔔 *AIRTEL BTS TEST*\nAlert system configured for: ${r.name||r.phone}\nNOC: http://74.225.144.11:3000\n_Airtel BTS Monitoring · Assam_`);
+    const res=await fetch(`https://api.callmebot.com/whatsapp.php?phone=${r.phone}&text=${msg}&apikey=${r.apikey}`);
+    setTesting(s=>({...s,[i]:res.ok?"sent":"failed"}));}
+    catch{setTesting(s=>({...s,[i]:"failed"}));}
+    setTimeout(()=>setTesting(s=>{const n={...s};delete n[i];return n;}),4000);
+  };
 
-  const metrics = [
-    { label:"Response Rate", value:`${ackRate}%`, sub:"alarms handled", color: ackRate >= 90 ? "text-green-400" : ackRate >= 70 ? "text-yellow-400" : "text-red-400" },
-    { label:"MTTA",          value: mtta != null ? `${mtta}s` : "—", sub:"mean time to ack", color:"text-blue-400" },
-    { label:"Critical",      value: critical,  sub:"today",           color: critical > 0 ? "text-red-400" : "text-gray-400" },
-    { label:"Cleared",       value: cleared,   sub:"resolved",        color:"text-green-400" },
-  ];
-
-  return (
-    <div className="grid grid-cols-4 gap-3">
-      {metrics.map(m => (
-        <div key={m.label} className="bg-gray-900 border border-gray-800 rounded-xl p-4">
-          <p className="text-xs font-mono text-gray-500 uppercase tracking-widest mb-2">{m.label}</p>
-          <p className={`text-3xl font-bold font-mono ${m.color}`}>{m.value}</p>
-          <p className="text-xs font-mono text-gray-700 mt-1">{m.sub}</p>
+  return(
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/75 backdrop-blur-sm">
+      <div className="w-full max-w-lg bg-gray-900 border border-gray-700 rounded-2xl overflow-hidden shadow-2xl">
+        <div className="flex items-center justify-between px-5 py-4 border-b border-gray-800 bg-gray-950">
+          <div><h2 className="text-white font-bold font-mono text-sm">⚙️ Alert Settings</h2><p className="text-xs text-gray-500 font-mono mt-0.5">WhatsApp notifications · Alarm sounds</p></div>
+          <button onClick={onClose} className="text-gray-500 hover:text-white p-1.5 rounded-lg hover:bg-gray-800 transition-colors"><svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12"/></svg></button>
         </div>
-      ))}
-    </div>
-  );
-}
-
-// ── WhatsApp contacts panel ────────────────────────────────────────────────────
-function ContactsPanel({ onClose }) {
-  const [contacts,   setContacts  ] = useState([]);
-  const [loading,    setLoading   ] = useState(true);
-  const [form,       setForm      ] = useState({ name:"", phone:"", role:"NOC Operator", notify_high:true, notify_critical:true });
-  const [saving,     setSaving    ] = useState(false);
-  const [testStatus, setTestStatus] = useState({});
-  const [editingId,  setEditingId ] = useState(null);
-  const [error,      setError     ] = useState("");
-
-  const load = useCallback(async () => {
-    setLoading(true);
-    try {
-      const r = await fetch(`${ALARM_MANAGER_URL}/alerts/contacts`);
-      if (r.ok) setContacts(await r.json());
-    } catch {}
-    setLoading(false);
-  }, []);
-
-  useEffect(() => { load(); }, [load]);
-
-  const save = async () => {
-    if (!form.name.trim() || !form.phone.trim()) { setError("Name and phone are required"); return; }
-    setSaving(true); setError("");
-    try {
-      const method = editingId ? "PUT" : "POST";
-      const url    = editingId ? `${ALARM_MANAGER_URL}/alerts/contacts/${editingId}` : `${ALARM_MANAGER_URL}/alerts/contacts`;
-      const r = await fetch(url, { method, headers:{"Content-Type":"application/json"}, body: JSON.stringify(form) });
-      if (r.ok) {
-        setForm({ name:"", phone:"", role:"NOC Operator", notify_high:true, notify_critical:true });
-        setEditingId(null);
-        await load();
-      } else {
-        const d = await r.json();
-        setError(d.detail || "Save failed");
-      }
-    } catch (e) { setError(String(e)); }
-    setSaving(false);
-  };
-
-  const remove = async (id) => {
-    if (!confirm("Remove this contact?")) return;
-    await fetch(`${ALARM_MANAGER_URL}/alerts/contacts/${id}`, { method:"DELETE" });
-    await load();
-  };
-
-  const testContact = async (id, name) => {
-    setTestStatus(s => ({ ...s, [id]:"sending" }));
-    try {
-      const r = await fetch(`${ALARM_MANAGER_URL}/alerts/contacts/${id}/test`, { method:"POST" });
-      const d = await r.json();
-      setTestStatus(s => ({ ...s, [id]: d.status === "sent" ? "sent" : "failed" }));
-    } catch { setTestStatus(s => ({ ...s, [id]:"failed" })); }
-    setTimeout(() => setTestStatus(s => { const n={...s}; delete n[id]; return n; }), 3000);
-  };
-
-  const startEdit = (c) => {
-    setForm({ name:c.name, phone:c.phone, role:c.role, notify_high:c.notify_high, notify_critical:c.notify_critical });
-    setEditingId(c.id);
-  };
-
-  const toggleEnabled = async (c) => {
-    await fetch(`${ALARM_MANAGER_URL}/alerts/contacts/${c.id}`, {
-      method:"PUT", headers:{"Content-Type":"application/json"},
-      body: JSON.stringify({ enabled: !c.enabled })
-    });
-    await load();
-  };
-
-  return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/70 backdrop-blur-sm">
-      <div className="w-full max-w-2xl bg-gray-900 border border-gray-700 rounded-2xl shadow-2xl overflow-hidden max-h-[90vh] flex flex-col">
-        {/* Header */}
-        <div className="flex items-center justify-between px-6 py-4 border-b border-gray-800 bg-gray-950 shrink-0">
-          <div className="flex items-center gap-3">
-            <div className="w-8 h-8 bg-green-500/10 border border-green-500/30 rounded-lg flex items-center justify-center">
-              <svg className="w-4 h-4 text-green-400" fill="currentColor" viewBox="0 0 24 24">
-                <path d="M17.472 14.382c-.297-.149-1.758-.867-2.03-.967-.273-.099-.471-.148-.67.15-.197.297-.767.966-.94 1.164-.173.199-.347.223-.644.075-.297-.15-1.255-.463-2.39-1.475-.883-.788-1.48-1.761-1.653-2.059-.173-.297-.018-.458.13-.606.134-.133.298-.347.446-.52.149-.174.198-.298.298-.497.099-.198.05-.371-.025-.52-.075-.149-.669-1.612-.916-2.207-.242-.579-.487-.5-.669-.51-.173-.008-.371-.01-.57-.01-.198 0-.52.074-.792.372-.272.297-1.04 1.016-1.04 2.479 0 1.462 1.065 2.875 1.213 3.074.149.198 2.096 3.2 5.077 4.487.709.306 1.262.489 1.694.625.712.227 1.36.195 1.871.118.571-.085 1.758-.719 2.006-1.413.248-.694.248-1.289.173-1.413-.074-.124-.272-.198-.57-.347m-5.421 7.403h-.004a9.87 9.87 0 01-5.031-1.378l-.361-.214-3.741.982.998-3.648-.235-.374a9.86 9.86 0 01-1.51-5.26c.001-5.45 4.436-9.884 9.888-9.884 2.64 0 5.122 1.03 6.988 2.898a9.825 9.825 0 012.893 6.994c-.003 5.45-4.437 9.884-9.885 9.884m8.413-18.297A11.815 11.815 0 0012.05 0C5.495 0 .16 5.335.157 11.892c0 2.096.547 4.142 1.588 5.945L.057 24l6.305-1.654a11.882 11.882 0 005.683 1.448h.005c6.554 0 11.890-5.335 11.893-11.893a11.821 11.821 0 00-3.48-8.413z"/>
-              </svg>
-            </div>
-            <div>
-              <h2 className="text-white font-bold font-mono">WhatsApp Alert Contacts</h2>
-              <p className="text-xs text-gray-500 font-mono">{contacts.length} contacts · instant alarm notifications</p>
-            </div>
+        <div className="p-5 space-y-5 max-h-[75vh] overflow-y-auto">
+          <div className="bg-blue-500/10 border border-blue-500/20 rounded-lg p-4 space-y-2">
+            <p className="text-xs font-mono text-blue-400 font-bold uppercase tracking-wider">📱 WhatsApp Setup (once per number)</p>
+            <ol className="text-xs font-mono text-gray-400 space-y-1.5 list-decimal list-inside">
+              <li>Save <span className="text-white font-bold">+34 644 59 21 83</span> in WhatsApp contacts</li>
+              <li>Send exactly: <span className="text-white">I allow callmebot to send me messages</span></li>
+              <li>You receive an API key via WhatsApp message</li>
+              <li>Add phone + key below ↓</li>
+            </ol>
           </div>
-          <button onClick={onClose} className="text-gray-500 hover:text-white transition-colors p-2 rounded-lg hover:bg-gray-800">
-            <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-            </svg>
-          </button>
-        </div>
-
-        <div className="flex-1 overflow-y-auto p-6 space-y-6">
-          {/* Add / Edit form */}
-          <div className="bg-gray-950 border border-gray-800 rounded-xl p-4 space-y-3">
-            <p className="text-xs font-mono text-gray-400 uppercase tracking-wider mb-1">
-              {editingId ? "✏️ Edit Contact" : "➕ Add New Contact"}
-            </p>
-            <div className="grid grid-cols-2 gap-3">
-              <div>
-                <label className="text-xs font-mono text-gray-500 block mb-1">Name *</label>
-                <input
-                  className="w-full bg-gray-900 border border-gray-700 rounded-lg px-3 py-2 text-sm font-mono text-white focus:outline-none focus:border-green-500 transition-colors"
-                  placeholder="e.g. Rahul Sharma"
-                  value={form.name}
-                  onChange={e => setForm(f => ({ ...f, name: e.target.value }))}
-                />
-              </div>
-              <div>
-                <label className="text-xs font-mono text-gray-500 block mb-1">WhatsApp Number *</label>
-                <input
-                  className="w-full bg-gray-900 border border-gray-700 rounded-lg px-3 py-2 text-sm font-mono text-white focus:outline-none focus:border-green-500 transition-colors"
-                  placeholder="+919876543210"
-                  value={form.phone}
-                  onChange={e => setForm(f => ({ ...f, phone: e.target.value }))}
-                />
-              </div>
-              <div>
-                <label className="text-xs font-mono text-gray-500 block mb-1">Role</label>
-                <select
-                  className="w-full bg-gray-900 border border-gray-700 rounded-lg px-3 py-2 text-sm font-mono text-white focus:outline-none focus:border-green-500"
-                  value={form.role}
-                  onChange={e => setForm(f => ({ ...f, role: e.target.value }))}
-                >
-                  {["NOC Operator","Security Guard","Site Manager","Circle Manager","CTO"].map(r => (
-                    <option key={r} value={r}>{r}</option>
-                  ))}
-                </select>
-              </div>
-              <div className="flex flex-col gap-2 justify-end">
-                <label className="flex items-center gap-2 cursor-pointer">
-                  <input type="checkbox" checked={form.notify_high} onChange={e => setForm(f => ({ ...f, notify_high: e.target.checked }))} className="accent-orange-500" />
-                  <span className="text-xs font-mono text-orange-400">HIGH alerts</span>
-                </label>
-                <label className="flex items-center gap-2 cursor-pointer">
-                  <input type="checkbox" checked={form.notify_critical} onChange={e => setForm(f => ({ ...f, notify_critical: e.target.checked }))} className="accent-red-500" />
-                  <span className="text-xs font-mono text-red-400">CRITICAL alerts</span>
-                </label>
-              </div>
-            </div>
-            {error && <p className="text-xs font-mono text-red-400">⚠ {error}</p>}
-            <div className="flex gap-2">
-              <button
-                onClick={save}
-                disabled={saving}
-                className="px-4 py-2 bg-green-500/10 border border-green-500/30 text-green-400 text-sm font-mono rounded-lg hover:bg-green-500/20 transition-colors disabled:opacity-50"
-              >
-                {saving ? "Saving…" : editingId ? "Update Contact" : "Add Contact"}
-              </button>
-              {editingId && (
-                <button
-                  onClick={() => { setEditingId(null); setForm({ name:"", phone:"", role:"NOC Operator", notify_high:true, notify_critical:true }); }}
-                  className="px-4 py-2 bg-gray-800 border border-gray-700 text-gray-400 text-sm font-mono rounded-lg hover:bg-gray-700 transition-colors"
-                >
-                  Cancel
-                </button>
-              )}
-            </div>
-          </div>
-
-          {/* Contact list */}
-          {loading ? (
-            <div className="text-center py-8 text-gray-600 font-mono text-sm">Loading contacts…</div>
-          ) : contacts.length === 0 ? (
-            <div className="text-center py-8 text-gray-700 font-mono text-sm">No contacts yet — add one above</div>
-          ) : (
+          {nums.length>0&&(
             <div className="space-y-2">
-              {contacts.map(c => (
-                <div key={c.id} className={`flex items-center gap-3 p-3 bg-gray-950 border rounded-xl transition-colors ${c.enabled ? "border-gray-800" : "border-gray-800/50 opacity-60"}`}>
-                  {/* Avatar */}
-                  <div className="w-9 h-9 rounded-full bg-green-500/10 border border-green-500/20 flex items-center justify-center shrink-0">
-                    <span className="text-sm font-bold text-green-400">{c.name[0]?.toUpperCase()}</span>
-                  </div>
+              <p className="text-xs font-mono text-gray-500 uppercase tracking-wider">Configured Recipients ({nums.length})</p>
+              {nums.map((r,i)=>(
+                <div key={i} className="flex items-center gap-3 bg-gray-800 border border-gray-700 rounded-lg px-3 py-3">
                   <div className="flex-1 min-w-0">
-                    <div className="flex items-center gap-2">
-                      <span className="text-sm font-mono text-white">{c.name}</span>
-                      <span className="text-xs font-mono text-gray-600">{c.role}</span>
-                    </div>
-                    <div className="flex items-center gap-2 mt-0.5">
-                      <span className="text-xs font-mono text-gray-400">{c.phone}</span>
-                      {c.notify_critical && <span className="text-xs font-mono text-red-400 border border-red-500/20 px-1 rounded">CRIT</span>}
-                      {c.notify_high && <span className="text-xs font-mono text-orange-400 border border-orange-500/20 px-1 rounded">HIGH</span>}
-                    </div>
+                    {r.name&&<p className="text-xs font-mono text-white font-bold">{r.name}</p>}
+                    <p className="text-sm font-mono text-gray-300">{r.phone}</p>
+                    <p className="text-xs font-mono text-gray-600">Key: {r.apikey.slice(0,6)}••••</p>
                   </div>
-                  <div className="flex items-center gap-1.5 shrink-0">
-                    {/* Test button */}
-                    <button
-                      onClick={() => testContact(c.id, c.name)}
-                      disabled={testStatus[c.id] === "sending"}
-                      className={`px-2 py-1 text-xs font-mono rounded border transition-colors ${
-                        testStatus[c.id] === "sent"    ? "bg-green-500/20 border-green-500/40 text-green-400" :
-                        testStatus[c.id] === "failed"  ? "bg-red-500/20 border-red-500/40 text-red-400" :
-                        "bg-gray-800 border-gray-700 text-gray-400 hover:text-white"
-                      }`}
-                    >
-                      {testStatus[c.id] === "sending" ? "…" : testStatus[c.id] === "sent" ? "✓ Sent" : testStatus[c.id] === "failed" ? "✗ Failed" : "Test"}
-                    </button>
-                    {/* Enable toggle */}
-                    <button
-                      onClick={() => toggleEnabled(c)}
-                      className={`px-2 py-1 text-xs font-mono rounded border transition-colors ${c.enabled ? "bg-green-500/10 border-green-500/20 text-green-400" : "bg-gray-800 border-gray-700 text-gray-600"}`}
-                    >
-                      {c.enabled ? "ON" : "OFF"}
-                    </button>
-                    {/* Edit */}
-                    <button onClick={() => startEdit(c)} className="p-1.5 text-gray-600 hover:text-white rounded hover:bg-gray-800 transition-colors">
-                      <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
-                      </svg>
-                    </button>
-                    {/* Delete */}
-                    <button onClick={() => remove(c.id)} className="p-1.5 text-gray-600 hover:text-red-400 rounded hover:bg-gray-800 transition-colors">
-                      <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
-                      </svg>
-                    </button>
-                  </div>
+                  <button onClick={()=>test(r,i)} className={`text-xs font-mono px-2.5 py-1.5 rounded border transition-colors shrink-0 ${testing[i]==="sending"?"border-yellow-500/30 text-yellow-400 bg-yellow-500/10":testing[i]==="sent"?"border-green-500/30 text-green-400 bg-green-500/10":testing[i]==="failed"?"border-red-500/30 text-red-400 bg-red-500/10":"border-gray-600 text-gray-400 hover:text-white hover:border-gray-500"}`}>
+                    {testing[i]==="sending"?"…":testing[i]==="sent"?"✓ Sent":testing[i]==="failed"?"✗ Failed":"Test"}
+                  </button>
+                  <button onClick={()=>remove(i)} className="text-gray-600 hover:text-red-400 transition-colors p-1 shrink-0"><svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"/></svg></button>
                 </div>
               ))}
             </div>
           )}
-
-          {/* Twilio setup note */}
-          <div className="bg-blue-950/40 border border-blue-500/20 rounded-xl p-4">
-            <p className="text-xs font-mono text-blue-400 mb-2">⚙ WhatsApp Setup (Twilio)</p>
-            <div className="space-y-1 text-xs font-mono text-gray-500">
-              <p>1. Create account at twilio.com/try-twilio</p>
-              <p>2. Enable WhatsApp Sandbox in Twilio Console</p>
-              <p>3. Add to .env: TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN</p>
-              <p>4. Recipients must send "join &lt;sandbox-word&gt;" to +14155238886 once</p>
-              <p className="text-blue-500 mt-1">Alarm sound links are included in every alert message</p>
+          <div className="space-y-2">
+            <p className="text-xs font-mono text-gray-500 uppercase tracking-wider">Add Recipient</p>
+            <input value={name} onChange={e=>setName(e.target.value)} placeholder="Name (optional)" className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2.5 text-sm font-mono text-white placeholder-gray-600 focus:outline-none focus:border-blue-500"/>
+            <input value={phone} onChange={e=>setPhone(e.target.value)} placeholder="+919876543210" className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2.5 text-sm font-mono text-white placeholder-gray-600 focus:outline-none focus:border-blue-500"/>
+            <input value={key} onChange={e=>setKey(e.target.value)} placeholder="CallMeBot API Key" className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2.5 text-sm font-mono text-white placeholder-gray-600 focus:outline-none focus:border-blue-500"/>
+            <button onClick={add} disabled={!phone.trim()||!key.trim()} className="w-full py-2.5 rounded-lg bg-blue-600 hover:bg-blue-500 disabled:opacity-40 disabled:cursor-not-allowed text-white text-sm font-mono font-bold transition-colors">Add Recipient</button>
+          </div>
+          <div className="bg-gray-800 border border-gray-700 rounded-lg p-4 space-y-3">
+            <p className="text-xs font-mono text-gray-500 uppercase tracking-wider">🔊 Alarm Sound Test</p>
+            <div className="flex gap-2">
+              <button onClick={()=>playAlarm("HIGH")} className="flex-1 py-2 rounded-lg border border-orange-500/30 text-orange-400 text-xs font-mono hover:bg-orange-500/10 transition-colors">▶ HIGH Alert</button>
+              <button onClick={()=>playAlarm("CRITICAL")} className="flex-1 py-2 rounded-lg border border-red-500/30 text-red-400 text-xs font-mono hover:bg-red-500/10 transition-colors">▶ CRITICAL Alert</button>
             </div>
+            <p className="text-xs font-mono text-gray-700">Plays automatically when new alarm arrives in browser</p>
           </div>
         </div>
       </div>
@@ -512,116 +221,88 @@ function ContactsPanel({ onClose }) {
   );
 }
 
-// ── Alarm detail modal with tabs ──────────────────────────────────────────────
-function AlarmDetail({ alarm, onClose, onAck, onClear }) {
-  const sev  = SEVERITY[alarm.severity] || SEVERITY.HIGH;
-  const [tab, setTab] = useState("details");
+// ── Alarm Modal ──────────────────────────────────────────────────────────────
+function AlarmModal({alarm,onClose,onAck,onClear}){
+  const [tab,setTab]=useState("details");
+  const sev=SEV[alarm.severity]||SEV.HIGH;
+  const tabs=[{id:"details",icon:"📋",label:"Details"},{id:"snapshot",icon:"📷",label:`Snapshot${alarm.snapshots?.length>0?" ("+alarm.snapshots.length+")":""}`},{id:"livestream",icon:"🎥",label:"Live Stream"}];
 
-  const tabs = ["details", "snapshots", "live"];
-
-  return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/70 backdrop-blur-sm">
-      <div className={`w-full max-w-3xl bg-gray-900 border ${sev.border} rounded-2xl shadow-2xl overflow-hidden`}>
+  return(
+    <div className="fixed inset-0 z-40 flex items-center justify-center p-4 bg-black/75 backdrop-blur-sm">
+      <div className={`w-full max-w-2xl bg-gray-900 border ${sev.border} rounded-2xl shadow-2xl overflow-hidden`}>
         {/* Header */}
-        <div className={`flex items-center justify-between px-6 py-4 border-b ${sev.border} bg-gray-950`}>
+        <div className={`flex items-center justify-between px-5 py-4 border-b border-gray-800 ${sev.bg} bg-gray-950`}>
           <div className="flex items-center gap-3">
-            <PulseDot color={sev.dot} />
+            <Dot color={sev.dot}/>
             <div>
-              <div className="flex items-center gap-2">
-                <span className={`text-xs font-mono px-2 py-0.5 rounded ${sev.badge}`}>{alarm.severity}</span>
-                <span className={`text-xs font-mono px-2 py-0.5 rounded ${STATUS[alarm.status] || STATUS.ACTIVE}`}>{alarm.status}</span>
+              <div className="flex items-center gap-2 flex-wrap">
+                <Badge className={sev.badge}>{alarm.severity}</Badge>
+                <Badge className={`${STAT[alarm.status]||STAT.ACTIVE} border`}>{alarm.status}</Badge>
+                {alarm.snapshots?.length>0&&<Badge className="bg-blue-500/15 text-blue-400 border-blue-500/30">📷 {alarm.snapshots.length} snap</Badge>}
               </div>
-              <h2 className="text-white font-bold font-mono mt-1 text-lg">
-                {alarm.alarm_id || alarm.id?.slice(0, 8).toUpperCase()}
-              </h2>
+              <h2 className="text-white font-bold font-mono mt-1.5 text-lg tracking-wide">ALM — {(alarm.id||"").slice(0,8).toUpperCase()}</h2>
+              <p className="text-xs font-mono text-gray-500 mt-0.5">{alarm.site_id} · {alarm.camera_id}</p>
             </div>
           </div>
-          <button onClick={onClose} className="text-gray-500 hover:text-white transition-colors p-2 rounded-lg hover:bg-gray-800">
-            <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-            </svg>
-          </button>
+          <button onClick={onClose} className="text-gray-500 hover:text-white p-2 rounded-lg hover:bg-gray-800 transition-colors"><svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12"/></svg></button>
         </div>
-
         {/* Tabs */}
         <div className="flex border-b border-gray-800 bg-gray-950">
-          {tabs.map(t => (
-            <button
-              key={t}
-              onClick={() => setTab(t)}
-              className={`flex-1 py-2.5 text-xs font-mono uppercase tracking-wider transition-colors ${tab === t ? "text-white border-b-2 border-white" : "text-gray-600 hover:text-gray-400"}`}
-            >
-              {t === "live" ? "Live Stream" : t}
+          {tabs.map(t=>(
+            <button key={t.id} onClick={()=>setTab(t.id)} className={`flex items-center gap-2 px-5 py-3 text-xs font-mono transition-colors border-b-2 ${tab===t.id?"border-red-500 text-white bg-gray-900":"border-transparent text-gray-500 hover:text-gray-300"}`}>
+              <span>{t.icon}</span>{t.label}
             </button>
           ))}
         </div>
-
-        <div className="p-6 max-h-[70vh] overflow-y-auto">
-          {/* Details tab */}
-          {tab === "details" && (
-            <div className="space-y-4">
-              <div className="grid grid-cols-2 gap-4">
-                {[
-                  ["Site ID",      alarm.site_id],
-                  ["Camera",       alarm.camera_id],
-                  ["Threat Level", alarm.threat_level || "INTRUSION DETECTED"],
-                  ["Confidence",   alarm.confidence ? `${(alarm.confidence * 100).toFixed(1)}%` : "—"],
-                  ["Persons",      alarm.person_count ?? "—"],
-                  ["Animals",      alarm.animal_count ?? "—"],
-                  ["Date",         fmtDate(alarm.created_at)],
-                  ["Time",         fmtTime(alarm.created_at)],
-                ].map(([label, val]) => (
-                  <div key={label} className="bg-gray-950 rounded-lg p-3 border border-gray-800">
-                    <p className="text-xs font-mono text-gray-500 uppercase tracking-wider mb-1">{label}</p>
-                    <p className="text-sm font-mono text-white">{val || "—"}</p>
+        {/* Content */}
+        <div className="max-h-[58vh] overflow-y-auto">
+          {tab==="details"&&(
+            <div className="p-5 space-y-4">
+              {/* Timestamp banner */}
+              <div className="bg-gray-800 border border-gray-700 rounded-lg px-4 py-3 flex items-center justify-between">
+                <div><p className="text-xs font-mono text-gray-500 uppercase tracking-wider mb-0.5">Detection Time</p><p className="text-sm font-mono text-white font-bold">{fmtDateFull(alarm.created_at)}</p></div>
+                <div className="text-right"><p className="text-xs font-mono text-gray-500 uppercase tracking-wider mb-0.5">Duration</p><p className="text-sm font-mono text-orange-400">{fmtAgo(alarm.created_at)}</p></div>
+              </div>
+              <div className="grid grid-cols-2 gap-3">
+                {[["Site ID",alarm.site_id],["Camera ID",alarm.camera_id],["Threat Level",alarm.threat_level||"INTRUSION DETECTED"],["Confidence",fmtConf(alarm.confidence)],["Persons Detected",alarm.person_count??0],["Animals Detected",alarm.animal_count??0],["Detection Date",fmtDate(alarm.created_at)],["Detection Time",fmtTime(alarm.created_at)]].map(([l,v])=>(
+                  <div key={l} className="bg-gray-800 border border-gray-700 rounded-lg p-3">
+                    <p className="text-xs font-mono text-gray-500 uppercase tracking-wider mb-1">{l}</p>
+                    <p className="text-sm font-mono text-white">{String(v)||"—"}</p>
                   </div>
                 ))}
               </div>
-              {alarm.response && (
-                <div className="bg-red-950/50 border border-red-500/30 rounded-lg p-4">
-                  <p className="text-xs font-mono text-red-400 uppercase tracking-wider mb-1">Required Action</p>
-                  <p className="text-sm font-mono text-red-300">{alarm.response}</p>
-                </div>
-              )}
+              {alarm.response&&<div className="bg-red-950/50 border border-red-500/30 rounded-lg p-4"><p className="text-xs font-mono text-red-400 uppercase tracking-wider mb-1.5">⚠ Required Action</p><p className="text-sm font-mono text-red-300 font-bold">{alarm.response}</p></div>}
+              <div className="bg-gray-800/50 border border-gray-800 rounded-lg px-4 py-2.5 flex items-center justify-between">
+                <span className="text-xs font-mono text-gray-600">Full Alarm ID</span>
+                <span className="text-xs font-mono text-gray-400 select-all">{alarm.id}</span>
+              </div>
             </div>
           )}
-
-          {/* Snapshots tab */}
-          {tab === "snapshots" && <SnapshotGallery alarm={alarm} />}
-
-          {/* Live stream tab */}
-          {tab === "live" && (
-            <div className="space-y-4">
-              <LiveStreamPanel compact />
-              <div className="bg-gray-950 rounded-lg p-4 border border-gray-800 space-y-2">
-                <p className="text-xs font-mono text-gray-500 uppercase tracking-wider">Stream URLs</p>
-                <div className="flex items-center justify-between">
-                  <span className="text-xs font-mono text-gray-500">HLS (browser)</span>
-                  <a href={HLS_URL} target="_blank" rel="noreferrer" className="text-xs font-mono text-blue-400">{HLS_URL}</a>
-                </div>
-                <div className="flex items-center justify-between">
-                  <span className="text-xs font-mono text-gray-500">RTMP (VLC)</span>
-                  <span className="text-xs font-mono text-green-400 select-all">rtmp://74.225.144.11:1935/live/bts01</span>
+          {tab==="snapshot"&&<Snapshots alarm={alarm}/>}
+          {tab==="livestream"&&(
+            <div className="p-5 space-y-4">
+              <LiveStream compact/>
+              <div className="bg-gray-800 border border-gray-700 rounded-lg p-4 space-y-2 text-xs font-mono">
+                <p className="text-gray-500 uppercase tracking-wider mb-2">Stream URLs</p>
+                <div className="space-y-2">
+                  <div className="flex justify-between items-center"><span className="text-gray-500">HLS (browser)</span><a href={HLS_URL} target="_blank" rel="noreferrer" className="text-blue-400 hover:text-blue-300 transition-colors">Open in browser ↗</a></div>
+                  <div className="flex justify-between items-center"><span className="text-gray-500">RTMP (VLC)</span><span className="text-green-400 select-all">rtmp://74.225.144.11:1935/live/bts01</span></div>
+                  <div className="flex justify-between items-center"><span className="text-gray-500">Player</span><a href={PLAYER_URL} target="_blank" rel="noreferrer" className="text-blue-400 hover:text-blue-300 transition-colors">{PLAYER_URL} ↗</a></div>
                 </div>
               </div>
             </div>
           )}
-
-          {/* Actions */}
-          <div className="flex gap-3 pt-4 mt-4 border-t border-gray-800">
-            {alarm.status === "ACTIVE" && (
-              <button onClick={() => onAck(alarm.id)} className="flex-1 py-2.5 rounded-lg bg-yellow-500/10 border border-yellow-500/30 text-yellow-400 text-sm font-mono hover:bg-yellow-500/20 transition-colors">
-                Acknowledge
-              </button>
-            )}
-            {alarm.status !== "CLEARED" && (
-              <button onClick={() => onClear(alarm.id)} className="flex-1 py-2.5 rounded-lg bg-green-500/10 border border-green-500/30 text-green-400 text-sm font-mono hover:bg-green-500/20 transition-colors">
-                Clear Alarm
-              </button>
-            )}
-            <button onClick={onClose} className="px-6 py-2.5 rounded-lg bg-gray-800 border border-gray-700 text-gray-400 text-sm font-mono hover:bg-gray-700 transition-colors">
-              Close
-            </button>
+        </div>
+        {/* Actions */}
+        <div className="flex items-center justify-between px-5 py-4 border-t border-gray-800 bg-gray-950">
+          <div className="text-xs font-mono text-gray-600 space-y-0.5">
+            <p>Detected: {fmtDateFull(alarm.created_at)}</p>
+            {alarm.updated_at&&<p>Updated: {fmtDateFull(alarm.updated_at)}</p>}
+          </div>
+          <div className="flex gap-2">
+            {alarm.status==="ACTIVE"&&<button onClick={()=>onAck(alarm.id)} className="px-4 py-2 rounded-lg bg-yellow-500/10 border border-yellow-500/30 text-yellow-400 text-xs font-mono hover:bg-yellow-500/20 transition-colors font-bold">Acknowledge</button>}
+            {alarm.status!=="CLEARED"&&<button onClick={()=>{onClear(alarm.id);onClose();}} className="px-4 py-2 rounded-lg bg-green-500/10 border border-green-500/30 text-green-400 text-xs font-mono hover:bg-green-500/20 transition-colors font-bold">Clear Alarm</button>}
+            <button onClick={onClose} className="px-4 py-2 rounded-lg bg-gray-800 border border-gray-700 text-gray-400 text-xs font-mono hover:bg-gray-700 transition-colors">Close</button>
           </div>
         </div>
       </div>
@@ -629,288 +310,209 @@ function AlarmDetail({ alarm, onClose, onAck, onClear }) {
   );
 }
 
-// ── Alarm row ─────────────────────────────────────────────────────────────────
-function AlarmRow({ alarm, onClick }) {
-  const sev      = SEVERITY[alarm.severity] || SEVERITY.HIGH;
-  const isActive = alarm.status === "ACTIVE";
-  return (
-    <div onClick={onClick} className={`flex items-center gap-4 px-4 py-3.5 border-b border-gray-800 hover:bg-gray-800/50 transition-colors cursor-pointer ${isActive ? "bg-gray-900" : "bg-gray-900/50"}`}>
-      <div className="flex items-center gap-2 w-28 shrink-0">
-        {isActive && <PulseDot color={sev.dot} />}
-        <span className={`text-xs font-mono px-2 py-0.5 rounded ${sev.badge}`}>{alarm.severity}</span>
+// ── Alarm Row ────────────────────────────────────────────────────────────────
+function AlarmRow({alarm,onClick}){
+  const sev=SEV[alarm.severity]||SEV.HIGH;
+  const isActive=alarm.status==="ACTIVE";
+  const [tick,setTick]=useState(0);
+  useEffect(()=>{if(!isActive)return;const t=setInterval(()=>setTick(x=>x+1),1000);return()=>clearInterval(t);},[isActive]);
+
+  return(
+    <div onClick={onClick} className={`flex items-center gap-4 px-4 py-3.5 border-b border-gray-800/60 hover:bg-gray-800/40 cursor-pointer transition-colors ${isActive?"bg-gray-900":"bg-gray-900/40"}`}>
+      <div className="flex items-center gap-2 w-32 shrink-0">
+        {isActive?<Dot color={sev.dot} size="h-2 w-2"/>:<span className="w-2 h-2"/>}
+        <Badge className={sev.badge}>{alarm.severity}</Badge>
       </div>
       <div className="flex-1 min-w-0">
         <div className="flex items-center gap-2">
-          <span className="text-sm font-mono text-white truncate">{alarm.site_id}</span>
-          <span className="text-xs font-mono text-gray-600">·</span>
+          <span className="text-sm font-mono text-white truncate font-medium">{alarm.site_id}</span>
+          <span className="text-gray-700">·</span>
           <span className="text-xs font-mono text-gray-400">{alarm.camera_id}</span>
+          {alarm.snapshots?.length>0&&<span className="text-xs font-mono text-blue-400 shrink-0">📷</span>}
         </div>
-        <div className="flex items-center gap-2 mt-0.5">
-          <span className="text-xs font-mono text-gray-500">{alarm.threat_level || "INTRUSION DETECTED"}</span>
-          {alarm.person_count > 0 && <span className="text-xs font-mono text-red-400">{alarm.person_count} person{alarm.person_count > 1 ? "s" : ""}</span>}
-          {alarm.confidence && <span className="text-xs font-mono text-gray-600">{(alarm.confidence * 100).toFixed(0)}% conf</span>}
+        <div className="flex items-center gap-3 mt-0.5">
+          <span className="text-xs font-mono text-gray-500 truncate">{alarm.threat_level||"INTRUSION DETECTED"}</span>
+          {alarm.person_count>0&&<span className="text-xs font-mono text-red-400 shrink-0">{alarm.person_count}P</span>}
+          {alarm.confidence&&<span className="text-xs font-mono text-gray-600">{fmtConf(alarm.confidence)}</span>}
         </div>
       </div>
-      <div className="text-right shrink-0 space-y-1">
-        <div className={`text-xs font-mono px-2 py-0.5 rounded inline-block ${STATUS[alarm.status] || STATUS.ACTIVE}`}>{alarm.status}</div>
-        <div className="text-xs font-mono text-gray-600 block">{fmtDuration(alarm.created_at)}</div>
+      <div className="text-right shrink-0 space-y-1 min-w-0">
+        <Badge className={`${STAT[alarm.status]||STAT.ACTIVE} border`}>{alarm.status}</Badge>
+        <div className="text-xs font-mono text-gray-500 mt-1">{fmtTime(alarm.created_at)}</div>
+        <div className="text-xs font-mono text-gray-700">{isActive?fmtAgo(alarm.created_at):fmtDate(alarm.created_at)}</div>
       </div>
     </div>
   );
 }
 
-// ── Main dashboard ────────────────────────────────────────────────────────────
-export default function Dashboard() {
-  const [alarms,        setAlarms       ] = useState([]);
-  const [filter,        setFilter       ] = useState("ALL");
-  const [wsStatus,      setWsStatus     ] = useState("connecting");
-  const [selected,      setSelected     ] = useState(null);
-  const [showStream,    setShowStream   ] = useState(false);
-  const [showContacts,  setShowContacts ] = useState(false);
-  const [clock,         setClock        ] = useState(new Date());
-  const [soundEnabled,  setSoundEnabled ] = useState(true);
-  const [activeTab,     setActiveTab    ] = useState("alarms"); // "alarms" | "metrics"
-  const wsRef          = useRef(null);
-  const prevActiveRef  = useRef(0);
+// ── Main Dashboard ───────────────────────────────────────────────────────────
+export default function Dashboard(){
+  const [alarms,setAlarms]=useState([]);
+  const [filter,setFilter]=useState("ALL");
+  const [wsStatus,setWsStatus]=useState("connecting");
+  const [selected,setSelected]=useState(null);
+  const [showStream,setShowStream]=useState(false);
+  const [showSettings,setShowSettings]=useState(false);
+  const [clock,setClock]=useState(new Date());
+  const [soundOn,setSoundOn]=useState(true);
+  const wsRef=useRef(null);
+  const prevActive=useRef(0);
 
-  // Clock
-  useEffect(() => {
-    const t = setInterval(() => setClock(new Date()), 1000);
-    return () => clearInterval(t);
-  }, []);
+  useEffect(()=>{const t=setInterval(()=>setClock(new Date()),1000);return()=>clearInterval(t);},[]);
 
-  // WebSocket
-  const connectWs = useCallback(() => {
-    if (wsRef.current?.readyState === WebSocket.OPEN) return;
-    const ws = new WebSocket(ALARM_MANAGER_WS);
-    wsRef.current = ws;
-    ws.onopen  = () => setWsStatus("connected");
-    ws.onclose = () => { setWsStatus("reconnecting"); setTimeout(connectWs, 3000); };
-    ws.onerror = () => { setWsStatus("error"); ws.close(); };
-    ws.onmessage = (e) => {
-      try {
-        const msg = JSON.parse(e.data);
-        if (msg.type === "alarm_created" || msg.type === "new_alarm") {
-          setAlarms(prev => prev.find(a => a.id === msg.alarm.id) ? prev : [msg.alarm, ...prev]);
-        } else if (msg.type === "alarm_updated") {
-          setAlarms(prev => prev.map(a => a.id === msg.alarm.id ? msg.alarm : a));
-        } else if (msg.type === "initial_state" && msg.alarms) {
-          setAlarms(msg.alarms);
-        }
-      } catch {}
+  const connect=useCallback(()=>{
+    if(wsRef.current?.readyState===WebSocket.OPEN)return;
+    const ws=new WebSocket(ALARM_WS);wsRef.current=ws;
+    ws.onopen=()=>setWsStatus("connected");
+    ws.onclose=()=>{setWsStatus("reconnecting");setTimeout(connect,3000);};
+    ws.onerror=()=>{setWsStatus("error");ws.close();};
+    ws.onmessage=e=>{
+      try{const msg=JSON.parse(e.data);
+        if(msg.type==="alarm_created"||msg.type==="new_alarm"){
+          setAlarms(p=>{if(p.find(a=>a.id===msg.alarm.id))return p;return[msg.alarm,...p];});
+          if(soundOn)playAlarm(msg.alarm.severity);
+        }else if(msg.type==="alarm_updated"){
+          setAlarms(p=>p.map(a=>a.id===msg.alarm.id?msg.alarm:a));
+          setSelected(s=>s?.id===msg.alarm.id?msg.alarm:s);
+        }else if(msg.type==="initial_state"&&msg.alarms){setAlarms(msg.alarms);}
+      }catch{}
     };
-  }, []);
+  },[soundOn]);
 
-  useEffect(() => {
-    connectWs();
-    fetch(`${ALARM_MANAGER_URL}/alarms`)
-      .then(r => r.ok ? r.json() : [])
-      .then(data => { if (Array.isArray(data) && data.length) setAlarms(data); })
-      .catch(() => {});
-    return () => wsRef.current?.close();
-  }, [connectWs]);
+  useEffect(()=>{
+    connect();
+    fetch(`${ALARM_URL}/alarms`).then(r=>r.ok?r.json():[]).then(d=>{if(Array.isArray(d)&&d.length)setAlarms(d);}).catch(()=>{});
+    return()=>wsRef.current?.close();
+  },[connect]);
 
-  // Play sound when new active alarms appear
-  useEffect(() => {
-    const active = alarms.filter(a => a.status === "ACTIVE").length;
-    if (soundEnabled && active > prevActiveRef.current) {
-      const newest = alarms.find(a => a.status === "ACTIVE");
-      playAlarmSound(newest?.severity || "HIGH");
-    }
-    prevActiveRef.current = active;
-  }, [alarms, soundEnabled]);
+  useEffect(()=>{
+    const active=alarms.filter(a=>a.status==="ACTIVE").length;
+    if(active>prevActive.current&&soundOn){const n=alarms.find(a=>a.status==="ACTIVE");if(n)playAlarm(n.severity);}
+    prevActive.current=active;
+  },[alarms,soundOn]);
 
-  const ackAlarm = async (id) => {
-    await fetch(`${ALARM_MANAGER_URL}/alarms/${id}/acknowledge`, { method: "POST" });
-    setAlarms(prev => prev.map(a => a.id === id ? { ...a, status: "ACKNOWLEDGED" } : a));
-    if (selected?.id === id) setSelected(s => ({ ...s, status: "ACKNOWLEDGED" }));
-  };
+  const ack=async id=>{await fetch(`${ALARM_URL}/alarms/${id}/acknowledge`,{method:"POST"});setAlarms(p=>p.map(a=>a.id===id?{...a,status:"ACKNOWLEDGED"}:a));};
+  const clear=async id=>{await fetch(`${ALARM_URL}/alarms/${id}/clear`,{method:"POST"});setAlarms(p=>p.map(a=>a.id===id?{...a,status:"CLEARED"}:a));};
 
-  const clearAlarm = async (id) => {
-    await fetch(`${ALARM_MANAGER_URL}/alarms/${id}/clear`, { method: "POST" });
-    setAlarms(prev => prev.map(a => a.id === id ? { ...a, status: "CLEARED" } : a));
-    if (selected?.id === id) setSelected(null);
-  };
+  const filtered=alarms.filter(a=>filter==="ALL"?true:a.status===filter);
+  const activeCount=alarms.filter(a=>a.status==="ACTIVE").length;
+  const critCount=alarms.filter(a=>a.severity==="CRITICAL"&&a.status==="ACTIVE").length;
 
-  const filtered = alarms.filter(a => {
-    if (filter === "ALL")          return true;
-    if (filter === "ACTIVE")       return a.status === "ACTIVE";
-    if (filter === "ACKNOWLEDGED") return a.status === "ACKNOWLEDGED";
-    if (filter === "CLEARED")      return a.status === "CLEARED";
-    return true;
-  });
+  return(
+    <div className="min-h-screen bg-gray-950 text-white flex flex-col" style={{fontFamily:"'JetBrains Mono','Fira Code','Courier New',monospace"}}>
 
-  const activeCount   = alarms.filter(a => a.status === "ACTIVE").length;
-  const criticalCount = alarms.filter(a => a.severity === "CRITICAL" && a.status === "ACTIVE").length;
-
-  return (
-    <div className="min-h-screen bg-gray-950 text-white flex flex-col" style={{ fontFamily: "'JetBrains Mono', 'Fira Code', monospace" }}>
-
-      {/* ── Top bar ── */}
-      <header className="flex items-center justify-between px-6 py-3 bg-gray-900 border-b border-gray-800 shrink-0">
+      {/* Header */}
+      <header className="flex items-center justify-between px-5 py-3 bg-gray-900 border-b border-gray-800 shrink-0">
         <div>
           <div className="flex items-center gap-2">
-            <span className="text-red-500 font-bold text-sm tracking-widest">AIRTEL</span>
-            <span className="text-gray-600 text-xs">|</span>
-            <span className="text-xs text-gray-400 tracking-wider">BTS THEFT MONITORING — NOC</span>
+            <span className="text-red-500 font-black tracking-widest text-sm">AIRTEL</span>
+            <span className="text-gray-700 text-xs">|</span>
+            <span className="text-xs text-gray-400 tracking-wider uppercase">BTS Theft Monitoring — NOC Dashboard</span>
           </div>
-          <p className="text-xs text-gray-600 mt-0.5">Restricted Area Intrusion Detection · Assam Circle</p>
+          <p className="text-xs text-gray-600 mt-0.5">Restricted Area Intrusion Detection · Assam Circle · {clock.toLocaleDateString("en-IN",{weekday:"long",day:"2-digit",month:"long",year:"numeric"})}</p>
         </div>
-
         <div className="flex items-center gap-3">
-          {activeCount > 0 && (
-            <div className="flex items-center gap-2 px-3 py-1.5 bg-red-500/10 border border-red-500/30 rounded-lg animate-pulse">
-              <PulseDot color="bg-red-500" />
-              <span className="text-xs font-mono text-red-400">{activeCount} ACTIVE ALARM{activeCount > 1 ? "S" : ""}</span>
-            </div>
-          )}
-
-          {/* Sound toggle */}
-          <button
-            onClick={() => setSoundEnabled(s => !s)}
-            className={`flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-mono border transition-colors ${soundEnabled ? "bg-blue-500/10 text-blue-400 border-blue-500/30" : "bg-gray-800 text-gray-600 border-gray-700"}`}
-            title="Toggle alarm sound"
-          >
-            {soundEnabled ? "🔊 SOUND ON" : "🔇 MUTED"}
+          {activeCount>0&&<div className="flex items-center gap-1.5 px-3 py-1.5 bg-red-500/10 border border-red-500/30 rounded-lg"><Dot color="bg-red-500" size="h-2 w-2"/><span className="text-xs font-mono text-red-400 font-bold">{activeCount} ACTIVE ALARM{activeCount>1?"S":""}</span></div>}
+          <button onClick={()=>setSoundOn(s=>!s)} title={soundOn?"Mute":"Unmute"} className={`p-2 rounded-lg border transition-colors ${soundOn?"border-gray-700 text-gray-400 hover:text-white":"border-red-500/30 text-red-400 bg-red-500/10"}`}>
+            {soundOn?<svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15.536 8.464a5 5 0 010 7.072M12 6v12m-3.536-9.536a5 5 0 000 7.072"/></svg>:<svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5.586 15H4a1 1 0 01-1-1v-4a1 1 0 011-1h1.586l4.707-4.707C10.923 3.663 12 4.109 12 5v14c0 .891-1.077 1.337-1.707.707L5.586 15z"/><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17 14l2-2m0 0l2-2m-2 2l-2-2m2 2l2 2"/></svg>}
           </button>
-
-          {/* WhatsApp contacts */}
-          <button
-            onClick={() => setShowContacts(true)}
-            className="flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-mono border border-green-500/30 bg-green-500/10 text-green-400 hover:bg-green-500/20 transition-colors"
-          >
-            📱 Contacts
+          <button onClick={()=>setShowSettings(true)} title="Settings" className="p-2 rounded-lg border border-gray-700 text-gray-400 hover:text-white hover:border-gray-600 transition-colors">
+            <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z"/><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"/></svg>
           </button>
-
-          {/* WS status */}
-          <div className={`flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-mono border ${
-            wsStatus === "connected"   ? "bg-green-500/10 text-green-400 border-green-500/30" :
-            wsStatus === "connecting"  ? "bg-yellow-500/10 text-yellow-400 border-yellow-500/30" :
-            "bg-red-500/10 text-red-400 border-red-500/30"
-          }`}>
-            <PulseDot color={wsStatus === "connected" ? "bg-green-500" : wsStatus === "connecting" ? "bg-yellow-400" : "bg-red-500"} />
-            {wsStatus === "connected" ? "LIVE" : wsStatus === "connecting" ? "CONNECTING" : "RECONNECTING"}
+          <div className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-full text-xs font-mono border ${wsStatus==="connected"?"bg-green-500/10 text-green-400 border-green-500/30":wsStatus==="connecting"?"bg-yellow-500/10 text-yellow-400 border-yellow-500/30":"bg-red-500/10 text-red-400 border-red-500/30"}`}>
+            <Dot color={wsStatus==="connected"?"bg-green-500":wsStatus==="connecting"?"bg-yellow-400":"bg-red-500"} size="h-2 w-2"/>
+            {wsStatus==="connected"?"LIVE":wsStatus==="connecting"?"CONNECTING":"RECONNECTING"}
           </div>
-
-          {/* Clock */}
-          <div className="text-right">
-            <div className="text-sm font-mono text-white">{clock.toLocaleTimeString("en-IN")}</div>
-            <div className="text-xs font-mono text-gray-600">{clock.toLocaleDateString("en-IN", {day:"2-digit",month:"short",year:"numeric"})}</div>
+          <div className="text-right border-l border-gray-800 pl-3">
+            <div className="text-sm font-mono text-white tabular-nums font-bold">{clock.toLocaleTimeString("en-IN",{hour:"2-digit",minute:"2-digit",second:"2-digit",hour12:false})}</div>
+            <div className="text-xs font-mono text-gray-600">{clock.toLocaleDateString("en-IN",{day:"2-digit",month:"short",year:"numeric"})}</div>
           </div>
         </div>
       </header>
 
-      {/* ── Critical banner ── */}
-      {criticalCount > 0 && (
-        <div className="bg-red-500 px-6 py-2 flex items-center justify-center gap-3">
-          <svg className="w-4 h-4 text-white animate-pulse" fill="currentColor" viewBox="0 0 20 20">
-            <path fillRule="evenodd" d="M8.257 3.099c.765-1.36 2.722-1.36 3.486 0l5.58 9.92c.75 1.334-.213 2.98-1.742 2.98H4.42c-1.53 0-2.493-1.646-1.743-2.98l5.58-9.92zM11 13a1 1 0 11-2 0 1 1 0 012 0zm-1-8a1 1 0 00-1 1v3a1 1 0 002 0V6a1 1 0 00-1-1z" clipRule="evenodd" />
-          </svg>
-          <span className="text-white text-sm font-bold font-mono tracking-widest">
-            !! CRITICAL ALERT — {criticalCount} MASS INTRUSION DETECTED — DISPATCH MULTIPLE SECURITY UNITS IMMEDIATELY !!
-          </span>
-        </div>
-      )}
+      {/* Critical banner */}
+      {critCount>0&&<div className="bg-red-600 px-4 py-2 flex items-center justify-center gap-3 shrink-0 animate-pulse">
+        <svg className="w-4 h-4 text-white" fill="currentColor" viewBox="0 0 20 20"><path fillRule="evenodd" d="M8.257 3.099c.765-1.36 2.722-1.36 3.486 0l5.58 9.92c.75 1.334-.213 2.98-1.742 2.98H4.42c-1.53 0-2.493-1.646-1.743-2.98l5.58-9.92zM11 13a1 1 0 11-2 0 1 1 0 012 0zm-1-8a1 1 0 00-1 1v3a1 1 0 002 0V6a1 1 0 00-1-1z" clipRule="evenodd"/></svg>
+        <span className="text-white text-sm font-black tracking-widest">!! CRITICAL — {critCount} MASS INTRUSION — DISPATCH MULTIPLE UNITS IMMEDIATELY !!</span>
+      </div>}
 
-      {/* ── Main content ── */}
+      {/* Body */}
       <div className="flex-1 flex overflow-hidden">
-
-        {/* ── Left: Alarms + Metrics ── */}
-        <div className={`flex flex-col ${showStream ? "w-1/2" : "flex-1"} border-r border-gray-800 overflow-hidden transition-all duration-300`}>
-
-          {/* Performance metrics */}
-          <div className="p-4 border-b border-gray-800 shrink-0">
-            <PerfMetrics alarms={alarms} />
+        {/* Alarm list */}
+        <div className={`flex flex-col ${showStream?"w-1/2":"flex-1"} border-r border-gray-800 overflow-hidden transition-all duration-300`}>
+          {/* Stats row */}
+          <div className="grid grid-cols-4 border-b border-gray-800 shrink-0">
+            {[["Active",activeCount,activeCount>0?"text-red-400 animate-pulse":"text-gray-500"],["Critical",critCount,critCount>0?"text-red-400":"text-gray-500"],["Total Today",alarms.length,"text-white"],["Cleared",alarms.filter(a=>a.status==="CLEARED").length,"text-green-400"]].map(([l,v,c],i)=>(
+              <div key={i} className="px-5 py-4 border-r border-gray-800 last:border-r-0">
+                <p className="text-xs font-mono text-gray-600 uppercase tracking-widest mb-1">{l}</p>
+                <p className={`text-3xl font-black font-mono ${c}`}>{v}</p>
+              </div>
+            ))}
           </div>
-
-          {/* Filter tabs + stream toggle */}
-          <div className="flex items-center justify-between px-4 py-2 border-b border-gray-800 shrink-0">
+          {/* Filters */}
+          <div className="flex items-center justify-between px-4 py-2.5 border-b border-gray-800 bg-gray-950 shrink-0">
             <div className="flex gap-1">
-              {["ALL","ACTIVE","ACKNOWLEDGED","CLEARED"].map(f => (
-                <button
-                  key={f}
-                  onClick={() => setFilter(f)}
-                  className={`px-3 py-1.5 rounded text-xs font-mono transition-colors ${filter === f ? "bg-white text-gray-950 font-bold" : "text-gray-500 hover:text-white hover:bg-gray-800"}`}
-                >
-                  {f}
-                  {f === "ACTIVE" && activeCount > 0 && (
-                    <span className="ml-1.5 bg-red-500 text-white text-xs rounded-full px-1.5 py-0.5">{activeCount}</span>
-                  )}
+              {["ALL","ACTIVE","ACKNOWLEDGED","CLEARED"].map(f=>(
+                <button key={f} onClick={()=>setFilter(f)} className={`px-3 py-1.5 rounded text-xs font-mono transition-colors ${filter===f?"bg-white text-gray-950 font-black":"text-gray-500 hover:text-white hover:bg-gray-800"}`}>
+                  {f}{f==="ACTIVE"&&activeCount>0&&<span className="ml-1.5 bg-red-500 text-white rounded-full px-1.5 py-px text-xs">{activeCount}</span>}
                 </button>
               ))}
             </div>
-            <button
-              onClick={() => setShowStream(s => !s)}
-              className={`flex items-center gap-2 px-3 py-1.5 rounded text-xs font-mono border transition-colors ${showStream ? "bg-blue-500/20 border-blue-500/40 text-blue-400" : "border-gray-700 text-gray-500 hover:text-white hover:border-gray-600"}`}
-            >
-              <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 10l4.553-2.276A1 1 0 0121 8.723v6.554a1 1 0 01-1.447.894L15 14M3 8a2 2 0 012-2h8a2 2 0 012 2v8a2 2 0 01-2 2H5a2 2 0 01-2-2V8z" />
-              </svg>
-              {showStream ? "HIDE STREAM" : "LIVE FEED"}
+            <button onClick={()=>setShowStream(s=>!s)} className={`flex items-center gap-1.5 px-3 py-1.5 rounded text-xs font-mono border transition-colors ${showStream?"bg-blue-500/15 border-blue-500/30 text-blue-400":"border-gray-700 text-gray-500 hover:text-white"}`}>
+              🎥 {showStream?"HIDE":"LIVE FEED"}
             </button>
           </div>
-
-          {/* Alarm list */}
-          <div className="flex-1 overflow-y-auto">
-            <div className="flex items-center gap-4 px-4 py-2 border-b border-gray-800 bg-gray-950 text-xs font-mono text-gray-600 uppercase tracking-wider sticky top-0">
-              <span className="w-28 shrink-0">Severity</span>
-              <span className="flex-1">Site · Camera · Threat</span>
-              <span className="text-right shrink-0">Status · Time</span>
-            </div>
-
-            {filtered.length === 0 ? (
-              <div className="flex flex-col items-center justify-center h-64 text-gray-700">
-                <svg className="w-12 h-12 mb-3 opacity-30" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
-                </svg>
-                <p className="text-sm font-mono">No alarms in this view</p>
-                <p className="text-xs text-gray-800 mt-1">All clear — monitoring active</p>
-              </div>
-            ) : (
-              filtered.map(alarm => (
-                <AlarmRow key={alarm.id} alarm={alarm} onClick={() => setSelected(alarm)} />
-              ))
-            )}
+          {/* Column headers */}
+          <div className="flex items-center gap-4 px-4 py-2 border-b border-gray-800 bg-gray-950 text-xs font-mono text-gray-600 uppercase tracking-wider shrink-0">
+            <span className="w-32 shrink-0">Severity</span>
+            <span className="flex-1">Site · Camera · Threat</span>
+            <span className="text-right shrink-0">Status · Time</span>
           </div>
-
-          <div className="px-4 py-2 border-t border-gray-800 bg-gray-950 flex items-center justify-between shrink-0">
-            <span className="text-xs font-mono text-gray-600">{filtered.length} alarm{filtered.length !== 1 ? "s" : ""} shown</span>
-            <span className="text-xs font-mono text-gray-700">Click row → Details · Snapshots · Live</span>
+          {/* Rows */}
+          <div className="flex-1 overflow-y-auto">
+            {filtered.length===0?(
+              <div className="flex flex-col items-center justify-center h-64 text-gray-700">
+                <svg className="w-12 h-12 mb-3 opacity-20" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
+                <p className="text-sm font-mono">No alarms in this view</p>
+                <p className="text-xs text-gray-800 mt-1">All clear · monitoring active</p>
+              </div>
+            ):filtered.map(a=><AlarmRow key={a.id} alarm={a} onClick={()=>setSelected(a)}/>)}
+          </div>
+          {/* Footer */}
+          <div className="px-4 py-2.5 border-t border-gray-800 bg-gray-950 flex items-center justify-between text-xs font-mono text-gray-700 shrink-0">
+            <span>{filtered.length} alarm{filtered.length!==1?"s":""} · Last updated: {fmtTime(new Date().toISOString())}</span>
+            <span>Click row → details, snapshots &amp; live feed</span>
           </div>
         </div>
 
-        {/* ── Right: Live stream panel ── */}
-        {showStream && (
+        {/* Live stream sidebar */}
+        {showStream&&(
           <div className="w-1/2 flex flex-col overflow-hidden">
             <div className="flex items-center justify-between px-4 py-3 border-b border-gray-800 bg-gray-900 shrink-0">
-              <span className="text-xs font-mono text-gray-400 uppercase tracking-wider">Live Camera Feed</span>
-              <button onClick={() => setShowStream(false)} className="text-gray-600 hover:text-white transition-colors">
-                <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-                </svg>
-              </button>
+              <span className="text-xs font-mono text-gray-400 uppercase tracking-wider">📹 Live Camera Feed</span>
+              <button onClick={()=>setShowStream(false)} className="text-gray-600 hover:text-white transition-colors"><svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12"/></svg></button>
             </div>
             <div className="flex-1 p-4 overflow-y-auto space-y-4">
-              <LiveStreamPanel />
-              <div className="bg-gray-900 border border-gray-800 rounded-xl p-4 space-y-3">
-                <p className="text-xs font-mono text-gray-500 uppercase tracking-wider">Site Information</p>
-                <div className="grid grid-cols-2 gap-3">
-                  {[["Site ID","AIRTEL-ASM-BTS-001"],["Camera","CAM-BTS-01"],["Model","CP Plus EZ-S35T"],["Network","4G LTE (Airtel SIM)"],["Resolution","800×448 · 15fps"],["Protocol","RTMP Push"]].map(([k,v]) => (
-                    <div key={k}>
-                      <p className="text-xs text-gray-600 font-mono">{k}</p>
-                      <p className="text-xs text-white font-mono mt-0.5">{v}</p>
-                    </div>
-                  ))}
-                </div>
+              <LiveStream/>
+              <div className="bg-gray-900 border border-gray-800 rounded-xl p-4 text-xs font-mono space-y-2">
+                <p className="text-gray-500 uppercase tracking-wider mb-2">Site Information</p>
+                {[["Site","AIRTEL-ASM-BTS-001"],["Camera","CAM-BTS-01"],["Model","CP Plus EZ-S35T"],["Network","4G LTE (Airtel SIM)"],["Resolution","800×448 · H.264 · 15fps"],["Server","74.225.144.11 · Azure Central India"],["RTMP","rtmp://74.225.144.11:1935/live/bts01"]].map(([k,v])=>(
+                  <div key={k} className="flex justify-between gap-4"><span className="text-gray-600 shrink-0">{k}</span><span className="text-white text-right select-all truncate">{v}</span></div>
+                ))}
+              </div>
+              <div className="bg-gray-900 border border-gray-800 rounded-xl p-4 space-y-2">
+                <p className="text-xs font-mono text-gray-500 uppercase tracking-wider mb-2">Quick Actions</p>
+                {[["Open Live Player ↗",PLAYER_URL,"text-blue-400 hover:text-blue-300"],["Open HLS Stream ↗",HLS_URL,"text-blue-400 hover:text-blue-300"]].map(([l,u,c])=>(
+                  <a key={l} href={u} target="_blank" rel="noreferrer" className={`flex items-center justify-between w-full px-3 py-2.5 bg-gray-800 hover:bg-gray-700 border border-gray-700 rounded-lg transition-colors text-xs font-mono ${c}`}><span>{l}</span></a>
+                ))}
               </div>
             </div>
           </div>
         )}
       </div>
 
-      {/* ── Modals ── */}
-      {selected && <AlarmDetail alarm={selected} onClose={() => setSelected(null)} onAck={ackAlarm} onClear={clearAlarm} />}
-      {showContacts && <ContactsPanel onClose={() => setShowContacts(false)} />}
+      {selected&&<AlarmModal alarm={selected} onClose={()=>setSelected(null)} onAck={ack} onClear={clear}/>}
+      {showSettings&&<SettingsPanel onClose={()=>setShowSettings(false)}/>}
     </div>
   );
 }
