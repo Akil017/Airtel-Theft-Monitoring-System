@@ -126,7 +126,7 @@ function Snapshots({alarm}){
     <div className="p-4 space-y-3">
       <div className="flex items-center justify-between">
         <p className="text-xs font-mono text-gray-500 uppercase tracking-wider">{snaps.length} Frame{snaps.length>1?"s":""} Captured at Detection</p>
-        <p className="text-xs font-mono text-gray-600">{fmtDateFull(alarm.created_at)}</p>
+        <p className="text-xs font-mono text-gray-600">{fmtDateFull(alarm.first_detected)}</p>
       </div>
       <div className={`grid gap-3 ${snaps.length===1?"grid-cols-1":snaps.length===2?"grid-cols-2":"grid-cols-3"}`}>
         {snaps.map((snap,i)=>(
@@ -240,7 +240,7 @@ function AlarmModal({alarm,onClose,onAck,onClear}){
                 <Badge className={`${STAT[alarm.status]||STAT.ACTIVE} border`}>{alarm.status}</Badge>
                 {alarm.snapshots?.length>0&&<Badge className="bg-blue-500/15 text-blue-400 border-blue-500/30">📷 {alarm.snapshots.length} snap</Badge>}
               </div>
-              <h2 className="text-white font-bold font-mono mt-1.5 text-lg tracking-wide">ALM — {(alarm.id||"").slice(0,8).toUpperCase()}</h2>
+              <h2 className="text-white font-bold font-mono mt-1.5 text-lg tracking-wide">ALM — {(alarm.alarm_id||"").slice(0,8).toUpperCase()}</h2>
               <p className="text-xs font-mono text-gray-500 mt-0.5">{alarm.site_id} · {alarm.camera_id}</p>
             </div>
           </div>
@@ -260,11 +260,11 @@ function AlarmModal({alarm,onClose,onAck,onClear}){
             <div className="p-5 space-y-4">
               {/* Timestamp banner */}
               <div className="bg-gray-800 border border-gray-700 rounded-lg px-4 py-3 flex items-center justify-between">
-                <div><p className="text-xs font-mono text-gray-500 uppercase tracking-wider mb-0.5">Detection Time</p><p className="text-sm font-mono text-white font-bold">{fmtDateFull(alarm.created_at)}</p></div>
-                <div className="text-right"><p className="text-xs font-mono text-gray-500 uppercase tracking-wider mb-0.5">Duration</p><p className="text-sm font-mono text-orange-400">{fmtAgo(alarm.created_at)}</p></div>
+                <div><p className="text-xs font-mono text-gray-500 uppercase tracking-wider mb-0.5">Detection Time</p><p className="text-sm font-mono text-white font-bold">{fmtDateFull(alarm.first_detected)}</p></div>
+                <div className="text-right"><p className="text-xs font-mono text-gray-500 uppercase tracking-wider mb-0.5">Duration</p><p className="text-sm font-mono text-orange-400">{fmtAgo(alarm.first_detected)}</p></div>
               </div>
               <div className="grid grid-cols-2 gap-3">
-                {[["Site ID",alarm.site_id],["Camera ID",alarm.camera_id],["Threat Level",alarm.threat_level||"INTRUSION DETECTED"],["Confidence",fmtConf(alarm.confidence)],["Persons Detected",alarm.person_count??0],["Animals Detected",alarm.animal_count??0],["Detection Date",fmtDate(alarm.created_at)],["Detection Time",fmtTime(alarm.created_at)]].map(([l,v])=>(
+                {[["Site ID",alarm.site_id],["Camera ID",alarm.camera_id],["Threat Level",alarm.threat_level||"INTRUSION DETECTED"],["Confidence",fmtConf(alarm.confidence)],["Persons Detected",alarm.person_count??0],["Animals Detected",alarm.animal_count??0],["Detection Date",fmtDate(alarm.first_detected)],["Detection Time",fmtTime(alarm.first_detected)],["eNode Alarm ID",alarm.enode_alarm_id||"—"],["Detections",alarm.detection_count??0]].map(([l,v])=>(
                   <div key={l} className="bg-gray-800 border border-gray-700 rounded-lg p-3">
                     <p className="text-xs font-mono text-gray-500 uppercase tracking-wider mb-1">{l}</p>
                     <p className="text-sm font-mono text-white">{String(v)||"—"}</p>
@@ -274,7 +274,7 @@ function AlarmModal({alarm,onClose,onAck,onClear}){
               {alarm.response&&<div className="bg-red-950/50 border border-red-500/30 rounded-lg p-4"><p className="text-xs font-mono text-red-400 uppercase tracking-wider mb-1.5">⚠ Required Action</p><p className="text-sm font-mono text-red-300 font-bold">{alarm.response}</p></div>}
               <div className="bg-gray-800/50 border border-gray-800 rounded-lg px-4 py-2.5 flex items-center justify-between">
                 <span className="text-xs font-mono text-gray-600">Full Alarm ID</span>
-                <span className="text-xs font-mono text-gray-400 select-all">{alarm.id}</span>
+                <span className="text-xs font-mono text-gray-400 select-all">{alarm.alarm_id}</span>
               </div>
             </div>
           )}
@@ -296,12 +296,12 @@ function AlarmModal({alarm,onClose,onAck,onClear}){
         {/* Actions */}
         <div className="flex items-center justify-between px-5 py-4 border-t border-gray-800 bg-gray-950">
           <div className="text-xs font-mono text-gray-600 space-y-0.5">
-            <p>Detected: {fmtDateFull(alarm.created_at)}</p>
-            {alarm.updated_at&&<p>Updated: {fmtDateFull(alarm.updated_at)}</p>}
+            <p>Detected: {fmtDateFull(alarm.first_detected)}</p>
+            {alarm.last_updated&&<p>Updated: {fmtDateFull(alarm.last_updated)}</p>}
           </div>
           <div className="flex gap-2">
-            {alarm.status==="ACTIVE"&&<button onClick={()=>onAck(alarm.id)} className="px-4 py-2 rounded-lg bg-yellow-500/10 border border-yellow-500/30 text-yellow-400 text-xs font-mono hover:bg-yellow-500/20 transition-colors font-bold">Acknowledge</button>}
-            {alarm.status!=="CLEARED"&&<button onClick={()=>{onClear(alarm.id);onClose();}} className="px-4 py-2 rounded-lg bg-green-500/10 border border-green-500/30 text-green-400 text-xs font-mono hover:bg-green-500/20 transition-colors font-bold">Clear Alarm</button>}
+            {alarm.status==="ACTIVE"&&<button onClick={()=>onAck(alarm.alarm_id)} className="px-4 py-2 rounded-lg bg-yellow-500/10 border border-yellow-500/30 text-yellow-400 text-xs font-mono hover:bg-yellow-500/20 transition-colors font-bold">Acknowledge</button>}
+            {alarm.status!=="CLEARED"&&<button onClick={()=>{onClear(alarm.alarm_id);onClose();}} className="px-4 py-2 rounded-lg bg-green-500/10 border border-green-500/30 text-green-400 text-xs font-mono hover:bg-green-500/20 transition-colors font-bold">Clear Alarm</button>}
             <button onClick={onClose} className="px-4 py-2 rounded-lg bg-gray-800 border border-gray-700 text-gray-400 text-xs font-mono hover:bg-gray-700 transition-colors">Close</button>
           </div>
         </div>
@@ -338,8 +338,8 @@ function AlarmRow({alarm,onClick}){
       </div>
       <div className="text-right shrink-0 space-y-1 min-w-0">
         <Badge className={`${STAT[alarm.status]||STAT.ACTIVE} border`}>{alarm.status}</Badge>
-        <div className="text-xs font-mono text-gray-500 mt-1">{fmtTime(alarm.created_at)}</div>
-        <div className="text-xs font-mono text-gray-700">{isActive?fmtAgo(alarm.created_at):fmtDate(alarm.created_at)}</div>
+        <div className="text-xs font-mono text-gray-500 mt-1">{fmtTime(alarm.first_detected)}</div>
+        <div className="text-xs font-mono text-gray-700">{isActive?fmtAgo(alarm.first_detected):fmtDate(alarm.first_detected)}</div>
       </div>
     </div>
   );
@@ -369,11 +369,11 @@ export default function Dashboard(){
     ws.onmessage=e=>{
       try{const msg=JSON.parse(e.data);
         if(msg.type==="alarm_created"||msg.type==="new_alarm"){
-          setAlarms(p=>{if(p.find(a=>a.id===msg.alarm.id))return p;return[msg.alarm,...p];});
+          setAlarms(p=>{if(p.find(a=>a.alarm_id===msg.alarm.alarm_id))return p;return[msg.alarm,...p];});
           if(soundOn)playAlarm(msg.alarm.severity);
         }else if(msg.type==="alarm_updated"){
-          setAlarms(p=>p.map(a=>a.id===msg.alarm.id?msg.alarm:a));
-          setSelected(s=>s?.id===msg.alarm.id?msg.alarm:s);
+          setAlarms(p=>p.map(a=>a.alarm_id===msg.alarm.alarm_id?msg.alarm:a));
+          setSelected(s=>s?.alarm_id===msg.alarm.alarm_id?msg.alarm:s);
         }else if(msg.type==="initial_state"&&msg.alarms){setAlarms(msg.alarms);}
       }catch{}
     };
@@ -391,8 +391,8 @@ export default function Dashboard(){
     prevActive.current=active;
   },[alarms,soundOn]);
 
-  const ack=async id=>{await fetch(`${ALARM_URL}/alarms/${id}/acknowledge`,{method:"POST"});setAlarms(p=>p.map(a=>a.id===id?{...a,status:"ACKNOWLEDGED"}:a));};
-  const clear=async id=>{await fetch(`${ALARM_URL}/alarms/${id}/clear`,{method:"POST"});setAlarms(p=>p.map(a=>a.id===id?{...a,status:"CLEARED"}:a));};
+  const ack=async id=>{await fetch(`${ALARM_URL}/alarms/${id}/acknowledge`,{method:"POST"});setAlarms(p=>p.map(a=>a.alarm_id===id?{...a,status:"ACKNOWLEDGED"}:a));};
+  const clear=async id=>{await fetch(`${ALARM_URL}/alarms/${id}/clear`,{method:"POST"});setAlarms(p=>p.map(a=>a.alarm_id===id?{...a,status:"CLEARED"}:a));};
 
   const filtered=alarms.filter(a=>filter==="ALL"?true:a.status===filter);
   const activeCount=alarms.filter(a=>a.status==="ACTIVE").length;
@@ -476,7 +476,7 @@ export default function Dashboard(){
                 <p className="text-sm font-mono">No alarms in this view</p>
                 <p className="text-xs text-gray-800 mt-1">All clear · monitoring active</p>
               </div>
-            ):filtered.map(a=><AlarmRow key={a.id} alarm={a} onClick={()=>setSelected(a)}/>)}
+            ):filtered.map(a=><AlarmRow key={a.alarm_id} alarm={a} onClick={()=>setSelected(a)}/>)}
           </div>
           {/* Footer */}
           <div className="px-4 py-2.5 border-t border-gray-800 bg-gray-950 flex items-center justify-between text-xs font-mono text-gray-700 shrink-0">
