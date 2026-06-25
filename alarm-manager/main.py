@@ -16,7 +16,7 @@ from datetime import datetime, timezone
 from typing import List, Optional
 from contextlib import asynccontextmanager
 from snapshot_router import router as snapshot_router
-from whatsapp_service import router as whatsapp_router, init_contacts_table
+from telegram_service import router as telegram_router, init_telegram, send_telegram_alert, send_telegram_status
 
 import asyncio
 import asyncpg
@@ -86,24 +86,7 @@ class WSManager:
         return len(self._clients)
 
 
-async def _send_whatsapp(alarm):
-    payload = {
-        "alarm_id": alarm.alarm_id,
-        "site_id": alarm.site_id,
-        "camera_id": alarm.camera_id,
-        "severity": alarm.severity,
-        "threat_level": alarm.threat_level or "INTRUSION DETECTED",
-        "person_count": alarm.person_count or 0,
-        "confidence": alarm.confidence or 0.0,
-        "snapshot_url": None,
-        "timestamp": alarm.first_detected.isoformat() + "Z",
-    }
 
-    async with httpx.AsyncClient(timeout=10.0) as client:
-        await client.post(
-            "http://localhost:8002/alerts/whatsapp/send",
-            json=payload
-        )
 ws_manager = WSManager()
 db_pool: asyncpg.Pool = None
 
@@ -132,7 +115,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="Alarm Manager", version="2.0.0", lifespan=lifespan)
 app.include_router(snapshot_router)
-app.include_router(whatsapp_router)
+app.include_router(telegram_router)
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
 
@@ -236,7 +219,7 @@ async def create_alarm(alarm: SecurityAlarm):
     payload = {**alarm.model_dump(mode="json"), "enode_alarm_id": enode_id}
     await ws_manager.broadcast({"event": "ALARM_CREATED", "alarm": payload})
     log.info(f"Alarm created: {alarm.alarm_id} | {sev} | {alarm.threat_level}")
-    asyncio.create_task(_send_whatsapp(alarm))
+    asyncio.create_task(send_telegram_alert(payload, alarm.snapshot_path))
     return payload
 @app.get("/alarms")
 async def list_alarms(status: Optional[str] = None, limit: int = 100):
@@ -269,6 +252,7 @@ async def acknowledge_alarm(req: AlarmAckRequest):
     await ws_manager.broadcast({"event": "ALARM_ACKNOWLEDGED",
                                  "alarm_id": req.alarm_id,
                                  "operator": req.operator_id})
+    asyncio.create_task(send_telegram_status(req.alarm_id, "ACKNOWLEDGED", req.operator_id))
     return {"status": "acknowledged", "alarm_id": req.alarm_id}
 
 @app.post("/alarms/clear")
@@ -305,10 +289,11 @@ async def clear_alarm(req: AlarmClearRequest):
                                  "alarm_id": req.alarm_id,
                                  "operator": req.operator_id,
                                  "reason": req.reason})
+    asyncio.create_task(send_telegram_status(req.alarm_id, "CLEARED", req.operator_id))
     return {"status": "cleared", "alarm_id": req.alarm_id}
 @app.on_event("startup")
 async def startup():
-    await init_contacts_table()   
+    init_telegram()
 @app.get("/snapshots/{filename}")
 async def get_snapshot(filename: str):
     """Serve snapshot images."""
