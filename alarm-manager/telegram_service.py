@@ -118,8 +118,10 @@ async def send_telegram_alert(alarm: dict, snapshot_path: Optional[str] = None) 
             else:
                 resp = await client.post(
                     f"{base}/sendMessage",
-                    json={"chat_id": _chat_id, "text": text,
+                    json={"chat_id": _chat_id, 
+                          "text": text,
                           "parse_mode": "Markdown",
+                          "disable_notification": False,
                           "disable_web_page_preview": False},
                 )
             if resp.status_code == 200:
