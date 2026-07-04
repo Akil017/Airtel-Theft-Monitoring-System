@@ -262,24 +262,22 @@ class DetectionService:
                     1 for b in results.boxes
                     if int(b.cls[0]) == 0 and float(b.conf[0]) >= settings.CONFIDENCE_THRESHOLD
                 )
-                # Save 3 snapshots
+                # Save snapshot to the SHARED volume so alarm-manager/dashboard can serve it
                 import os
                 from datetime import datetime as _dt
-                snap_dir = "/app/snapshots"
+                snap_dir = "/shared/snapshots"
                 os.makedirs(snap_dir, exist_ok=True)
                 ts = _dt.now().strftime("%Y%m%d_%H%M%S")
-                snaps = []
-                for s_idx in range(3):
-                    snap_path = f"{snap_dir}/snap_{ts}_{s_idx}.jpg"
-                    import cv2 as _cv2
-                    _cv2.imwrite(snap_path, frame)
-                    snaps.append(snap_path)
-                    log.info(f"Snapshot saved: {snap_path}")
+                safe_cam = settings.CAMERA_ID.replace("/", "-").replace(" ", "_")
+                filename = f"{safe_cam}_{ts}.jpg"
+                snap_path = f"{snap_dir}/{filename}"
+                import cv2 as _cv2
+                _cv2.imwrite(snap_path, frame)
+                log.info(f"Snapshot saved: {snap_path}")
 
                 event = self.build_event(conf, label, [x1, y1, x2, y2])
                 event["person_count"] = total_persons
-                event["snapshots"] = snaps
-                event["snapshot_path"] = snaps[0] if snaps else ""
+                event["snapshot_path"] = f"/snapshots/{filename}"
                 await self.post_event(event)
                 break  # Send one event per frame with total count
 

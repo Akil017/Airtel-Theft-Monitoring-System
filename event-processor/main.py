@@ -112,6 +112,7 @@ async def receive_detection(event: DetectionEvent):
         response        = response,
         first_detected  = event.timestamp,
         last_updated    = datetime.now(timezone.utc),
+        snapshot_path   = event.snapshot_path,
     )
 
     await forward_alarm(alarm)

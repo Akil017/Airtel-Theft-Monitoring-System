@@ -36,6 +36,7 @@ class DetectionEvent(BaseModel):
     bbox:       Optional[List[int]] = None
     timestamp:  datetime
     frame:      Optional[int] = None
+    snapshot_path: Optional[str] = None
 
 
 class SecurityAlarm(BaseModel):

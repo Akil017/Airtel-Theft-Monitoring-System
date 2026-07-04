@@ -41,7 +41,7 @@ services:
     environment:
       EVENT_PROCESSOR_URL: http://event-processor:8001
       ALARM_MANAGER_URL:   http://alarm-manager:8002
-      RTSP_URL:            rtmp://rtmp-server:1935/live/bts01
+      RTSP_URL:            rtmp://rtmp-server:1935/live/bts02
     depends_on:
       - event-processor
       - rtmp-server
@@ -57,8 +57,8 @@ services:
     env_file: .env
     environment:
       ALARM_MANAGER_URL:            http://alarm-manager:8002
-      MIN_CONFIDENCE:               "0.75"
-      CONSECUTIVE_FRAMES_REQUIRED:  "3"
+      MIN_CONFIDENCE:               "0.45"
+      CONSECUTIVE_FRAMES_REQUIRED:  "1"
     ports:
       - "8001:8001"
     depends_on:

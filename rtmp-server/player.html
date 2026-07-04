@@ -12,7 +12,7 @@ video { width:100vw; height:100vh; }
 <video id="v" controls autoplay muted></video>
 <script>
 var video = document.getElementById('v');
-var src = 'http://74.225.144.11:8080/hls/bts01.m3u8';
+var src = 'http://74.225.144.11:8080/hls/bts02.m3u8';
 if (Hls.isSupported()) {
   var hls = new Hls({ lowLatencyMode: true });
   hls.loadSource(src);
