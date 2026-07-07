@@ -1,37 +1,84 @@
-# Airtel BTS Theft Monitoring System
+# Airtel BTS Theft & Intrusion Monitoring System
 
-AI-powered restricted area intrusion detection for BTS sites.
-Built during Airtel Networks internship — Assam circle.
+AI-powered restricted-area intrusion detection for unmanned BTS towers — built
+during an Airtel Networks internship, NESA Circle (Assam).
+
+A 4G CCTV camera streams live video to a cloud server, where a YOLOv8 model
+distinguishes human intruders from animals in real time, triggers an on-site
+hooter, and pushes alerts to a NOC dashboard, Telegram, and a NOC ticketing
+service — all running as containerized microservices.
+
+---
+
+## Table of Contents
+
+- [Why This Exists](#why-this-exists)
+- [Architecture](#architecture)
+- [Services](#services)
+- [Severity & Detection Logic](#severity--detection-logic)
+- [Camera Integration](#camera-integration)
+- [Hooter Control](#hooter-control)
+- [Quick Start](#quick-start)
+- [Configuration](#configuration-env)
+- [Testing Without a Camera](#testing-without-a-camera)
+- [Folder Structure](#folder-structure)
+- [VM Deployment](#vm-deployment)
+- [Known Limitations](#known-limitations)
+- [Internship Context](#internship-context)
+
+---
+
+## Why This Exists
+
+BTS towers are frequently unmanned and remote — exactly the conditions that
+make them targets for cable theft, battery theft, diesel-generator theft, and
+vandalism. Traditional security relies on periodic manual patrols, meaning
+theft is often discovered hours or days after the fact, with no evidence
+trail. This system replaces that with continuous, automated visual monitoring
+and instant alerting.
 
 ---
 
 ## Architecture
 
+The camera in this deployment is 4G-only with no public IP — it sits behind
+carrier-grade NAT, so it cannot accept an inbound connection. Instead of
+pulling video from the camera, the camera **pushes** an RTMP stream outward to
+a cloud VM, which every other service then pulls from:
+
 ```
-CP Plus Camera (RTSP stream)
-          |
- Detection Service (port 8003)
-   - YOLOv8s inference
+CP Plus Camera (4G, no public IP)
+        |  pushes RTMP outbound
+        v
+ RTMP Server — nginx-rtmp (port 1935 / 8080)
+        |  pulled via an ffmpeg subprocess pipe
+        v                (OpenCV's native FFMPEG backend proved
+ Detection Service         unreliable against live RTMP — replaced
+   - YOLOv8s inference     with a direct ffmpeg pipe for reliability)
    - Person + animal detection
    - CP Plus hooter relay control
-          |  HTTP POST
+        |  HTTP POST
+        v
  Event Processor (port 8001)
-   - Business rules
-   - Confidence + consecutive frames
-   - Restricted site filter
-          |  HTTP POST
+   - Confidence threshold + consecutive-frame confirmation
+   - Restricted-site filter
+   - Severity / threat-level classification
+        |  HTTP POST
+        v
  Alarm Manager (port 8002)
    - PostgreSQL persistence
-   - WebSocket broadcast
-   - Hooter stop on CLEAR
-   - eNode NOC integration
-          |
-    +-----+-----+
-    |           |
- NOC Dashboard  eNode NOC Server (port 9000)
- (port 3000)    - Receives alarms from alarm-manager
- Next.js        - Operator clears from here
-                - Deployable to Vercel
+   - WebSocket broadcast to the dashboard
+   - Hooter stop command on CLEAR
+   - Forwards to the NOC ticketing service (optional)
+        |
+   +----+----+
+   |         |
+ NOC Dashboard   NOC Ticketing Service
+ (port 3000)     (port 9000)
+ Next.js         - Receives alarms from alarm-manager
+                 - Operators can clear alarms from here
+                 - Included as a self-contained prototype,
+                   deployable independently (e.g. to Vercel)
 ```
 
 ---
@@ -39,37 +86,58 @@ CP Plus Camera (RTSP stream)
 ## Services
 
 | Service | Port | Purpose |
-|---------|------|---------|
-| detection-service | 8003 | YOLOv8s + CP Plus hooter control |
-| event-processor | 8001 | Business rules engine |
-| alarm-manager | 8002 | PostgreSQL + WebSocket + eNode |
-| dashboard | 3000 | Internal NOC (Next.js) |
-| enode-noc | 9000 | eNode NOC server + dashboard |
-| postgres | 5432 | Alarm database |
+|---|---|---|
+| `rtmp-server` | 1935 (RTMP), 8080 (HLS/stat) | Receives the camera's outbound RTMP push, re-serves it to every consumer |
+| `detection-service` | 8003 | YOLOv8s inference over an ffmpeg-piped RTMP read; CP Plus hooter relay control |
+| `event-processor` | 8001 | Confidence/consecutive-frame business rules, severity classification |
+| `alarm-manager` | 8002 | PostgreSQL persistence, WebSocket broadcast, hooter-stop dispatch, NOC ticketing hook |
+| `dashboard` | 3000 | Operator-facing NOC dashboard (Next.js) |
+| `enode-noc` | 9000 | Included NOC ticketing prototype — receives and displays alarms independently of the main dashboard |
+| `postgres` | 5432 | Alarm history and state |
 
 ---
 
-## Severity Logic
+## Severity & Detection Logic
 
-Any person in a BTS site = threat. No exceptions.
+YOLOv8s runs on every third frame and classifies ten categories — a person,
+plus nine animal classes. Only **human** detections above the confidence
+threshold, that also pass the consecutive-frame and restricted-site checks,
+ever become an alarm:
 
-| Intruders | Severity | Threat | Hooter |
-|-----------|----------|--------|--------|
-| 1 person | HIGH | SINGLE INTRUDER | ON |
-| 2 persons | HIGH | COORDINATED INTRUSION | ON |
-| 3+ persons | CRITICAL | MASS INTRUSION | ON (louder pattern) |
-| Animal only | HIGH | ANIMAL INTRUSION | OFF (NOC notified only) |
+| Detection | Result |
+|---|---|
+| 1 person | **HIGH** severity — `SINGLE INTRUDER` — hooter ON |
+| 2 persons | **HIGH** severity — `COORDINATED INTRUSION` — hooter ON |
+| 3+ persons | **CRITICAL** severity — `MASS INTRUSION` — hooter ON (escalated pattern) |
+| Animal only (no person) | Logged for audit only — **no alarm is raised, no hooter, no NOC notification** |
+
+This asymmetry is deliberate: animals should never wake up a NOC operator or
+ring the hooter, but every detection is still logged so the history can be
+audited later if needed.
 
 ---
 
-## CP Plus Integration
+## Camera Integration
 
-### RTSP Stream
-```env
-RTSP_URL=rtsp://admin:PASSWORD@CAMERA_IP:554/stream1
+### Stream ingestion
+
+The camera pushes RTMP to the server; nothing pulls from the camera directly.
+On the camera side (EzyLiv+ or equivalent app), set the RTMP push target to:
+
+```
+rtmp://<your-server-ip>:1935/live/<stream-key>
 ```
 
-### Hooter Control
+The detection service then reads that same stream. Despite the variable name
+below being a legacy holdover from an earlier RTSP-based design, it now holds
+the RTMP URL:
+
+```env
+RTSP_URL=rtmp://rtmp-server:1935/live/bts01
+```
+
+### Hooter control
+
 ```env
 CPPLUS_CAM_IP=192.168.1.64
 CPPLUS_USER=admin
@@ -77,33 +145,20 @@ CPPLUS_PASS=your_password
 HOOTER_DURATION_SECONDS=30
 ```
 
-Leave `CPPLUS_CAM_IP` empty to disable hooter — system still works fully.
+Leave `CPPLUS_CAM_IP` empty to disable hooter control entirely — detection,
+alerting, and the dashboard all continue to work fully without it.
 
-### Hooter Flow
+### Hooter flow
+
 ```
 Human detected by YOLO
-    -> detection-service fires hooter relay ON
+    -> detection-service fires the hooter relay ON
     -> hooter rings for HOOTER_DURATION_SECONDS
     -> auto-off after duration
     OR
-    -> NOC operator clicks CLEAR
-    -> alarm-manager calls detection-service /hooter/stop
-    -> hooter off immediately
-```
-
----
-
-## eNode NOC Server
-
-Runs on port 9000. Receives alarms from alarm-manager.
-Operators can clear alarms from the eNode dashboard.
-
-**Local:** http://localhost:9000
-**Deploy to Vercel:** push `enode-noc/` folder to Vercel
-
-Set in .env:
-```env
-ENODE_API_URL=http://enode-noc:9000
+    -> NOC operator clicks Clear
+    -> alarm-manager calls detection-service's /hooter/stop
+    -> hooter stops immediately
 ```
 
 ---
@@ -115,26 +170,66 @@ git clone https://github.com/Akil017/Airtel-Theft-Monitoring-System.git
 cd Airtel-Theft-Monitoring-System
 
 cp .env.example .env
-# Edit .env — set RTSP_URL, CPPLUS_CAM_IP, CAMERA_ID, SITE_ID
+# edit .env — set CAMERA_ID, SITE_ID, RTSP_URL (RTMP target), CPPLUS_CAM_IP
 
-docker compose up --build
+docker compose up --build -d
 ```
 
-**URLs:**
 | URL | Description |
-|-----|-------------|
-| http://localhost:3000 | Internal NOC Dashboard |
-| http://localhost:9000 | eNode NOC Dashboard |
-| http://localhost:8002/docs | Alarm Manager API |
-| http://localhost:8001/docs | Event Processor API |
-| http://localhost:8003/health | Detection Service health |
+|---|---|
+| `http://localhost:3000` | NOC Dashboard |
+| `http://localhost:9000` | NOC Ticketing prototype |
+| `http://localhost:8002/docs` | Alarm Manager API (FastAPI docs) |
+| `http://localhost:8001/docs` | Event Processor API (FastAPI docs) |
+| `http://localhost:8003/health` | Detection Service health check |
+| `http://localhost:8080/stat` | RTMP server stream stats |
 
 ---
 
-## Test Without Camera
+## Configuration (`.env`)
+
+```env
+# Camera
+CAMERA_ID=CAM-BTS-01
+SITE_ID=AIRTEL-ASM-BTS-001
+RTSP_URL=                            # RTMP target, e.g. rtmp://rtmp-server:1935/live/bts01
+
+# CP Plus hooter (fill in after a site visit)
+CPPLUS_CAM_IP=                       # e.g. 192.168.1.64 — leave empty to disable
+CPPLUS_USER=admin
+CPPLUS_PASS=admin
+HOOTER_DURATION_SECONDS=30
+
+# YOLO
+MODEL_PATH=yolov8s.pt
+CONFIDENCE_THRESHOLD=0.45
+INFERENCE_EVERY_N_FRAMES=3
+DETECT_CLASSES=0,15,16,17,18,19,20,21,22,23
+
+# Business rules (event-processor)
+MIN_CONFIDENCE=0.45                  # keep in sync with CONFIDENCE_THRESHOLD above
+CONSECUTIVE_FRAMES_REQUIRED=3
+
+# NOC ticketing integration (optional)
+ENODE_API_URL=http://enode-noc:9000
+ENODE_API_KEY=
+
+# Database
+DATABASE_URL=postgresql+asyncpg://airtel:airtel@postgres:5432/airtel_monitor
+```
+
+> **Note:** `CONFIDENCE_THRESHOLD` (detector) and `MIN_CONFIDENCE`
+> (event-processor) are two independent settings enforced in two different
+> services. If they drift out of sync, the event-processor can silently
+> reject detections the detector already accepted — keep them equal unless
+> you deliberately want a stricter second gate.
+
+---
+
+## Testing Without a Camera
 
 ```bash
-# Send 3 events — 3rd one triggers alarm + hooter
+# send 3 events — the 3rd crosses CONSECUTIVE_FRAMES_REQUIRED and raises an alarm
 for i in 1 2 3; do
   curl -s -X POST http://localhost:8001/events/detection \
     -H "Content-Type: application/json" \
@@ -149,43 +244,10 @@ for i in 1 2 3; do
 done
 ```
 
-Test hooter directly:
+Test the hooter relay directly, independent of detection:
+
 ```bash
 curl -X POST http://localhost:8003/hooter/test
-```
-
----
-
-## Configuration (.env)
-
-```env
-# Camera
-CAMERA_ID=CAM-BTS-01
-SITE_ID=AIRTEL-ASM-BTS-001
-RTSP_URL=                            # leave empty for webcam
-
-# CP Plus Hooter (fill in after site visit)
-CPPLUS_CAM_IP=                       # 192.168.1.64
-CPPLUS_USER=admin
-CPPLUS_PASS=admin
-HOOTER_DURATION_SECONDS=30
-
-# YOLO
-MODEL_PATH=yolov8s.pt
-CONFIDENCE_THRESHOLD=0.45
-INFERENCE_EVERY_N_FRAMES=3
-DETECT_CLASSES=0,15,16,17,18,19,20,21,22,23
-
-# Business rules
-MIN_CONFIDENCE=0.45
-CONSECUTIVE_FRAMES_REQUIRED=3
-
-# eNode NOC
-ENODE_API_URL=http://enode-noc:9000
-ENODE_API_KEY=
-
-# Database
-DATABASE_URL=postgresql+asyncpg://airtel:airtel@postgres:5432/airtel_monitor
 ```
 
 ---
@@ -194,23 +256,24 @@ DATABASE_URL=postgresql+asyncpg://airtel:airtel@postgres:5432/airtel_monitor
 
 ```
 Airtel-Theft-Monitoring-System/
-|-- detection-service/     YOLOv8s + hooter control (port 8003)
-|-- event-processor/       Business rules (port 8001)
-|-- alarm-manager/         PostgreSQL + WebSocket + eNode (port 8002)
-|-- dashboard/             Internal NOC — Next.js (port 3000)
-|-- enode-noc/             eNode NOC server + dashboard (port 9000)
-|-- shared/                Pydantic models
-|-- docker-compose.yml
-|-- .env.example
-+-- README.md
+├── rtmp-server/          nginx-rtmp — camera ingestion (ports 1935, 8080)
+├── detection-service/    YOLOv8s + hooter control (port 8003)
+├── event-processor/      Business rules engine (port 8001)
+├── alarm-manager/        PostgreSQL + WebSocket + NOC hook (port 8002)
+├── dashboard/            NOC dashboard — Next.js (port 3000)
+├── enode-noc/            NOC ticketing prototype (port 9000)
+├── shared/               Shared Pydantic models
+├── docker-compose.yml
+├── .env.example
+└── README.md
 ```
 
 ---
 
-## VM Deployment Steps
+## VM Deployment
 
 ```bash
-# 1. SSH into VM
+# 1. SSH into the VM
 ssh ubuntu@YOUR_VM_IP
 
 # 2. Install Docker
@@ -226,13 +289,29 @@ nano .env   # set your values
 # 4. Run
 docker compose up --build -d
 
-# 5. Check
+# 5. Verify
 docker compose ps
 ```
 
 ---
 
+## Known Limitations
+
+- Single-site pilot deployment — not yet load-tested across multiple towers.
+- No TLS on the backend by default; a public dashboard deployment (e.g.
+  Vercel) needs an HTTPS-capable tunnel or reverse proxy in front of the
+  backend, since browsers block mixed HTTP/WS content from an HTTPS page.
+- The NOC ticketing service (`enode-noc`) is a self-built prototype
+  demonstrating the escalation pattern, not an integration with an existing
+  external enterprise NOC system.
+- No automatic reconnect/backoff tuning beyond basic retry loops if the
+  camera's 4G connection drops mid-stream.
+
+---
+
 ## Internship Context
 
-Built during Airtel Networks internship — Assam circle.
-BTS site threats: battery theft, diesel theft, cable theft, vandalism.
+Built during an Airtel Networks internship, NESA Circle (Assam), May–July 2026.
+Motivated by a well-known industry problem: passive infrastructure theft —
+cables, batteries, and diesel from generator sets — at remote, unmanned BTS
+sites.
